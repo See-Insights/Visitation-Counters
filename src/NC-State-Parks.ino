@@ -36,14 +36,14 @@ const int FRAMversionNumber = 2;                    // Increment this number eac
 struct systemStatus_structure {                     // currently 14 bytes long
   uint8_t structuresVersion;                        // Version of the data structures (system and data)
   uint8_t placeholder;                              // available for future use
-  uint8_t clockSet;                                 // Tells us if we need to connect and set the RTC
+  bool clockSet;                                    // Tells us if we need to connect and set the RTC
   uint8_t connectedStatus;
   uint8_t verboseMode;
   uint8_t solarPowerMode;
-  uint8_t lowPowerMode;
+  uint8_t lowPowerMode; // bool?
   uint8_t lowBatteryMode;
   int stateOfCharge;                                // Battery charge level
-  uint8_t batteryState;                               // Stores the current battery state
+  uint8_t batteryState;                             // Stores the current battery state
   int resetCount;                                   // reset count of device (0-256)
   float timezone;                                   // Time zone value -12 to +12
   float dstOffset;                                  // How much does the DST value change?
@@ -944,6 +944,17 @@ void dailyCleanup() {                                                  // Called
   systemStatusWriteNeeded=true;
 }
 
+/**
+ * @brief Applies the DST offset when appropriate
+ * 
+ * @details Extracts the integer offset from the string passed in, determines if DST needs to be applied to the clock,
+ * and communicates the action taken back to the remote monitoring service.
+ *
+ * @param command A string with the number of hours that will be added for DST. Only values of 0-2 are accepted.
+ * Values outside this range will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if successful, 0 if invalid command
+ */
 int setDSTOffset(String command) {                                      // This is the number of hours that will be added for Daylight Savings Time 0 (off) - 2
   char * pEND;
   char data[256];
@@ -963,10 +974,16 @@ int setDSTOffset(String command) {                                      // This 
   return 1;
 }
 
+/**
+ * @brief Determines whether or not USA is currently observing Daylight Savings Time or Standard Time
+ *
+ * @details United States of America Summer Timer calculation (2am Local Time - 2nd Sunday in March/ 1st Sunday in November)
+ * Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
+ * The code works in from months, days and hours in succession toward the two transitions
+ *
+ * @return true if currently observing DST, false if observing standard time
+ */
 bool isDSTusa() {
-  // United States of America Summer Timer calculation (2am Local Time - 2nd Sunday in March/ 1st Sunday in November)
-  // Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
-  // The code works in from months, days and hours in succession toward the two transitions
   int dayOfMonth = Time.day();
   int month = Time.month();
   int dayOfWeek = Time.weekday() - 1; // make Sunday 0 .. Saturday 6
@@ -992,21 +1009,27 @@ bool isDSTusa() {
   boolean dayStartedAs = (month == 10); // DST in October, in March not
   // on switching Sunday we need to consider the time
   if (secSinceMidnightLocal >= 2*3600)
-  { //  In the US, Daylight Time is based on local time
+  { // In the US, Daylight Time is based on local time
     return !dayStartedAs;
   }
   return dayStartedAs;
 }
 
+/**
+ * @brief Determines whether or not New Zealand is currently in NZDT or NZST to reflect DST
+ *
+ * @details New Zealand Summer Timer calculation (2am Local Time - last Sunday in September/ 1st Sunday in April)
+ * Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
+ * The code works in from months, days and hours in succession toward the two transitions
+ *
+ * @return true if currently observing DST, false if observing standard time
+ */
 bool isDSTnz() {
-  // New Zealand Summer Timer calculation (2am Local Time - last Sunday in September/ 1st Sunday in April)
-  // Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
-  // The code works in from months, days and hours in succession toward the two transitions
   int dayOfMonth = Time.day();
   int month = Time.month();
   int dayOfWeek = Time.weekday() - 1; // make Sunday 0 .. Saturday 6
 
-  // By Month - inside or outside the DST window - 10 out of 12 months with April and Septemper in question
+  // By Month - inside or outside the DST window - 10 out of 12 months with April and September in question
   if (month >= 10 || month <= 3)
   { // October to March is definetly DST - 6 months
     return true;
@@ -1027,7 +1050,7 @@ bool isDSTnz() {
   boolean dayStartedAs = (month == 10); // DST in October, in March not
   // on switching Sunday we need to consider the time
   if (secSinceMidnightLocal >= 2*3600)
-  { //  In the US, Daylight Time is based on local time
+  { // Daylight Time is based on local time
     return !dayStartedAs;
   }
   return dayStartedAs;
