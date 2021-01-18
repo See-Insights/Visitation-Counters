@@ -884,6 +884,18 @@ int setCloseTime(String command)
   return 1;
 }
 
+/**
+ * @brief Toggles the device into low power mode based on the input command.
+ * 
+ * @details If the command is "1", sets the device into low power mode. If the command is "0",
+ * sets the device into normal mode. Fails if neither of these are the inputs.
+ *
+ * @param command A string indicating whether to set the device into low power mode or into normal mode.
+ * A "1" indicates low power mode, a "0" indicates normal mode. Inputs that are neither of these commands
+ * will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if able to successfully take action, 0 if invalid command
+ */
 int setLowPowerMode(String command)                                   // This is where we can put the device into low power mode if needed
 {
   if (command != "1" && command != "0") return 0;                     // Before we begin, let's make sure we have a valid input
@@ -910,6 +922,11 @@ int setLowPowerMode(String command)                                   // This is
   return 1;
 }
 
+/**
+ * @brief Publishes a state transition over serial and to the Particle/Unidash monitoring system.
+ * 
+ * @details A good debugging tool.
+ */
 void publishStateTransition(void)
 {
   char stateTransitionString[40];
@@ -919,7 +936,13 @@ void publishStateTransition(void)
   Serial.println(stateTransitionString);
 }
 
-void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/electronsample
+/**
+ * @brief Fully resets modem.
+ * 
+ * @details Disconnects from the cloud, resets modem and SIM, and deep sleeps for 10 seconds.
+ * Adapted form Rikkas7's https://github.com/rickkas7/electronsample.
+ */
+void fullModemReset() {  // 
 	Particle.disconnect(); 	                                         // Disconnect from the cloud
 	unsigned long startTime = millis();  	                           // Wait up to 15 seconds to disconnect
 	while(Particle.connected() && millis() - startTime < 15000) {
@@ -933,7 +956,13 @@ void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/e
 	System.sleep(SLEEP_MODE_DEEP, 10);
 }
 
-void dailyCleanup() {                                                  // Called from Reporting State ONLY - clean house at the end of the day
+/**
+ * @brief Cleanup function that is run at the end of the day.
+ * 
+ * @details Syncs time with remote service and sets low power mode. Called from Reporting State ONLY.
+ * Clean house at the end of the day
+ */
+void dailyCleanup() {
   publishQueue.publish("Daily Cleanup","Running", PRIVATE);            // Make sure this is being run
   sysStatus.verboseMode = false;
   Particle.syncTime();                                                 // Set the clock each day
@@ -941,7 +970,7 @@ void dailyCleanup() {                                                  // Called
   if (sysStatus.solarPowerMode || sysStatus.stateOfCharge <= 70) {     // If Solar or if the battery is being discharged
     setLowPowerMode("1");
   }
-  systemStatusWriteNeeded=true;
+  systemStatusWriteNeeded = true;
 }
 
 /**
