@@ -20,7 +20,7 @@
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(4);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="4.00";
+char currentPointRelease[5] ="4.01";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -350,7 +350,6 @@ void loop()
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
-    ab1805.updateWakeReason();
     if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
       stayAwakeTimeStamp = millis();
     }
@@ -458,7 +457,7 @@ void sensorControl(bool enableSensor) {                               // What is
 }
 
 
-void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
+void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the device
 {
   static byte currentMinutePeriod;                                    // Current minute
 
@@ -534,6 +533,26 @@ void takeMeasurements()
   currentCountsWriteNeeded = true;
 }
 
+String batteryContextMessage() {
+  return batteryContext[sysStatus.batteryState];
+}
+
+
+bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.  
+{     
+  sysStatus.batteryState = System.batteryState();
+  PMIC pmic(true);                                                                
+  if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
+    pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
+    sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
+    return false;
+  }
+  else {
+    pmic.enableCharging();                                            // It is safe to charge the battery
+    return true;
+  }
+}
+
 void getSignalStrength() {
   const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
   // New Signal Strength capability - https://community.particle.io/t/boron-lte-and-cellular-rssi-funny-values/45299/8
@@ -561,20 +580,6 @@ int getTemperature()
   return current.temperature;
 }
 
-bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.  
-{     
-  sysStatus.batteryState = System.batteryState();
-  PMIC pmic(true);                                                                
-  if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
-    pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
-    sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
-    return false;
-  }
-  else {
-    pmic.enableCharging();                                            // It is safe to charge the battery
-    return true;
-  }
-}
 
 // Here are the various hardware and timer interrupt service routines
 void outOfMemoryHandler(system_event_t event, int param) {
@@ -678,15 +683,16 @@ bool connectToParticle() {
   // wait for *up to* 5 minutes
   for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
     if(sensorDetect) recordCount(); // service the interrupt every 10 seconds
-    Particle.process();
+    Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
+    ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
   if (Particle.connected()) {
     sysStatus.connectedStatus = true;
     systemStatusWriteNeeded = true;
-    return 1;                               // Were able to connect successfully
+    return 1;                                                     // Were able to connect successfully
   }
   else {
-    return 0;                                                    // Failed to connect
+    return 0;                                                     // Failed to connect
   }
 }
 
@@ -847,11 +853,6 @@ int setTimeZone(String command)
   }
 
   return 1;
-}
-
-
-String batteryContextMessage() {
-  return batteryContext[sysStatus.batteryState];
 }
 
 int setOpenTime(String command)
