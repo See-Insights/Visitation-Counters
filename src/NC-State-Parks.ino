@@ -15,13 +15,14 @@
 //V3 - defaults to trail counters
 //v4 - defaults to car counters - norm going forward - note this is only applied with a new device
 //v4.02 - Added watchdog petting to connecttoparticle and got rid of srtcpy
+//v4.03 - Added and out of memory reset into the main loop as recommended in AN023 above
 
 
 // Particle Product definitions
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(4);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="4.02";
+char currentPointRelease[5] ="4.03";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -135,7 +136,6 @@ bool currentCountsWriteNeeded = false;
 // These variables are associated with the watchdog timer and will need to be better integrated
 int outOfMemory = -1;
 time_t RTCTime;
-void outOfMemoryHandler(system_event_t event, int param);
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
@@ -414,12 +414,7 @@ void loop()
   }
   // Take care of housekeeping items here
   ab1805.loop();                                                      // Keeps the RTC synchronized with the Boron's clock
-  if (!sysStatus.clockSet) {
-    if (ab1805.isRTCSet()) {
-      sysStatus.clockSet = true;
-      systemStatusWriteNeeded = true;
-    }
-  }
+
   if (systemStatusWriteNeeded) {
     fram.put(FRAM::systemStatusAddr,sysStatus);
     systemStatusWriteNeeded = false;
@@ -427,6 +422,14 @@ void loop()
   if (currentCountsWriteNeeded) {
     fram.put(FRAM::currentCountsAddr,current);
     currentCountsWriteNeeded = false;
+  }
+
+  if (outOfMemory >= 0) {
+    // An out of memory condition occurred - reset device.
+    Log.info("out of memory occurred size=%d", outOfMemory);
+    delay(100);
+
+    System.reset();
   }
 }
 

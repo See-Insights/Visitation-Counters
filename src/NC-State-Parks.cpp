@@ -35,6 +35,7 @@ String batteryContextMessage();
 bool isItSafeToCharge();
 void getSignalStrength();
 int getTemperature();
+void outOfMemoryHandler(system_event_t event, int param);
 void sensorISR();
 void countSignalTimerISR();
 int setPowerConfig();
@@ -179,7 +180,6 @@ bool currentCountsWriteNeeded = false;
 // These variables are associated with the watchdog timer and will need to be better integrated
 int outOfMemory = -1;
 time_t RTCTime;
-void outOfMemoryHandler(system_event_t event, int param);
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
@@ -458,12 +458,7 @@ void loop()
   }
   // Take care of housekeeping items here
   ab1805.loop();                                                      // Keeps the RTC synchronized with the Boron's clock
-  if (!sysStatus.clockSet) {
-    if (ab1805.isRTCSet()) {
-      sysStatus.clockSet = true;
-      systemStatusWriteNeeded = true;
-    }
-  }
+
   if (systemStatusWriteNeeded) {
     fram.put(FRAM::systemStatusAddr,sysStatus);
     systemStatusWriteNeeded = false;
@@ -471,6 +466,14 @@ void loop()
   if (currentCountsWriteNeeded) {
     fram.put(FRAM::currentCountsAddr,current);
     currentCountsWriteNeeded = false;
+  }
+
+  if (outOfMemory >= 0) {
+    // An out of memory condition occurred - reset device.
+    Log.info("out of memory occurred size=%d", outOfMemory);
+    delay(100);
+
+    System.reset();
   }
 }
 
