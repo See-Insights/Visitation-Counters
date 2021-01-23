@@ -20,6 +20,7 @@
 //v2 - Made some significant improvements: temp dependent charging, avoiding use of "enable" sleep, better battery "context" - 
 //V3 - defaults to trail counters
 //v4 - defaults to car counters - norm going forward - note this is only applied with a new device
+//v4.02 - Added watchdog petting to connecttoparticle and got rid of srtcpy
 
 
 // Particle Product definitions
@@ -30,9 +31,10 @@ void recordCount();
 void sendEvent();
 void UbidotsHandler(const char *event, const char *data);
 void takeMeasurements();
+String batteryContextMessage();
+bool isItSafeToCharge();
 void getSignalStrength();
 int getTemperature();
-bool isItSafeToCharge();
 void sensorISR();
 void countSignalTimerISR();
 int setPowerConfig();
@@ -50,7 +52,6 @@ int setSolarMode(String command);
 int setSensorType(String command);
 int setverboseMode(String command);
 int setTimeZone(String command);
-String batteryContextMessage();
 int setOpenTime(String command);
 int setCloseTime(String command);
 int setLowPowerMode(String command);
@@ -60,11 +61,11 @@ void dailyCleanup();
 int setDSTOffset(String command);
 bool isDSTusa();
 bool isDSTnz();
-#line 20 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/NC-State-Parks.ino"
+#line 21 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/NC-State-Parks.ino"
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(4);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="4.00";
+char currentPointRelease[5] ="4.02";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -287,12 +288,12 @@ void setup()                                        // Note: Disconnected Setup(
   Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
-  (sysStatus.lowPowerMode) ? strcpy(lowPowerModeStr,"True") : strcpy(lowPowerModeStr,"False");
+  (sysStatus.lowPowerMode) ? strncpy(lowPowerModeStr,"True",sizeof(lowPowerModeStr)) : strncpy(lowPowerModeStr,"False",sizeof(lowPowerModeStr));
 
   sensorControl(true);                                                // Turn on the sensors.
 
-  if (sysStatus.sensorType == 0) strcpy(sensorTypeConfigStr,"Pressure Sensor");
-  else if (sysStatus.sensorType == 1) strcpy(sensorTypeConfigStr,"PIR Sensor");
+  if (sysStatus.sensorType == 0) strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
+  else if (sysStatus.sensorType == 1) strncpy(sensorTypeConfigStr,"PIR Sensor",sizeof(sensorTypeConfigStr));
 
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
@@ -394,7 +395,6 @@ void loop()
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
-    ab1805.updateWakeReason();
     if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
       stayAwakeTimeStamp = millis();
     }
@@ -502,7 +502,7 @@ void sensorControl(bool enableSensor) {                               // What is
 }
 
 
-void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
+void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the device
 {
   static byte currentMinutePeriod;                                    // Current minute
 
@@ -578,6 +578,26 @@ void takeMeasurements()
   currentCountsWriteNeeded = true;
 }
 
+String batteryContextMessage() {
+  return batteryContext[sysStatus.batteryState];
+}
+
+
+bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.  
+{     
+  sysStatus.batteryState = System.batteryState();
+  PMIC pmic(true);                                                                
+  if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
+    pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
+    sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
+    return false;
+  }
+  else {
+    pmic.enableCharging();                                            // It is safe to charge the battery
+    return true;
+  }
+}
+
 void getSignalStrength() {
   const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
   // New Signal Strength capability - https://community.particle.io/t/boron-lte-and-cellular-rssi-funny-values/45299/8
@@ -605,20 +625,6 @@ int getTemperature()
   return current.temperature;
 }
 
-bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.  
-{     
-  sysStatus.batteryState = System.batteryState();
-  PMIC pmic(true);                                                                
-  if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
-    pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
-    sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
-    return false;
-  }
-  else {
-    pmic.enableCharging();                                            // It is safe to charge the battery
-    return true;
-  }
-}
 
 // Here are the various hardware and timer interrupt service routines
 void outOfMemoryHandler(system_event_t event, int param) {
@@ -684,7 +690,7 @@ void loadSystemDefaults() {                                         // Default s
   sysStatus.openTime = 6;
   sysStatus.closeTime = 21;
   sysStatus.sensorType = 0;                                         // 0 is for pressure sensor , 1 is for PIR sensor
-  strcpy(sensorTypeConfigStr,"Pressure Sensor");
+  strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   fram.put(FRAM::systemStatusAddr,sysStatus);                       // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -696,7 +702,7 @@ void checkSystemValues() {                                          // Checks to
   }
   if (sysStatus.sensorType > 2) {
     sysStatus.sensorType = 0;
-    strcpy(sensorTypeConfigStr,"Pressure Sensor");
+    strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   }
   if (sysStatus.verboseMode < 0 || sysStatus.verboseMode > 1) sysStatus.verboseMode = false;
   if (sysStatus.solarPowerMode < 0 || sysStatus.solarPowerMode >1) sysStatus.solarPowerMode = 1;
@@ -722,15 +728,16 @@ bool connectToParticle() {
   // wait for *up to* 5 minutes
   for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
     if(sensorDetect) recordCount(); // service the interrupt every 10 seconds
-    Particle.process();
+    Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
+    ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
   if (Particle.connected()) {
     sysStatus.connectedStatus = true;
     systemStatusWriteNeeded = true;
-    return 1;                               // Were able to connect successfully
+    return 1;                                                     // Were able to connect successfully
   }
   else {
-    return 0;                                                    // Failed to connect
+    return 0;                                                     // Failed to connect
   }
 }
 
@@ -833,7 +840,7 @@ int setSensorType(String command) // Function to force sending data in current h
   if (command == "0")
   {
     sysStatus.sensorType = 0;
-    strcpy(sensorTypeConfigStr,"Pressure Sensor");
+    strncpy(sensorTypeConfigStr,"Pressure Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
     if (Particle.connected()) publishQueue.publish("Mode","Set Sensor Mode to Pressure", PRIVATE);
     
@@ -842,7 +849,7 @@ int setSensorType(String command) // Function to force sending data in current h
   else if (command == "1")
   {
     sysStatus.sensorType = 1;
-    strcpy(sensorTypeConfigStr,"PIR Sensor");
+    strncpy(sensorTypeConfigStr,"PIR Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
     if (Particle.connected()) publishQueue.publish("Mode","Set Sensor Mode to PIR", PRIVATE);
     return 1;
@@ -893,11 +900,6 @@ int setTimeZone(String command)
   return 1;
 }
 
-
-String batteryContextMessage() {
-  return batteryContext[sysStatus.batteryState];
-}
-
 int setOpenTime(String command)
 {
   char * pEND;
@@ -935,7 +937,7 @@ int setLowPowerMode(String command)                                   // This is
       publishQueue.publish("Mode","Low Power Mode", PRIVATE);
     }
     sysStatus.lowPowerMode = true;
-    strcpy(lowPowerModeStr,"True");
+    strncpy(lowPowerModeStr,"True", sizeof(lowPowerModeStr));
   }
   else if (command == "0")                                            // Command calls for clearing lowPowerMode
   {
@@ -946,7 +948,7 @@ int setLowPowerMode(String command)                                   // This is
     publishQueue.publish("Mode","Normal Operations", PRIVATE);
     delay(1000);                                                      // Need to make sure the message gets out.
     sysStatus.lowPowerMode = false;                                   // update the variable used for console status
-    strcpy(lowPowerModeStr,"False");                                  // Use capitalization so we know that we set this.
+    strncpy(lowPowerModeStr,"False", sizeof(lowPowerModeStr));                                  // Use capitalization so we know that we set this.
   }
   systemStatusWriteNeeded = true;
   return 1;

@@ -14,13 +14,14 @@
 //v2 - Made some significant improvements: temp dependent charging, avoiding use of "enable" sleep, better battery "context" - 
 //V3 - defaults to trail counters
 //v4 - defaults to car counters - norm going forward - note this is only applied with a new device
+//v4.02 - Added watchdog petting to connecttoparticle and got rid of srtcpy
 
 
 // Particle Product definitions
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(4);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="4.01";
+char currentPointRelease[5] ="4.02";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -243,12 +244,12 @@ void setup()                                        // Note: Disconnected Setup(
   Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
-  (sysStatus.lowPowerMode) ? strcpy(lowPowerModeStr,"True") : strcpy(lowPowerModeStr,"False");
+  (sysStatus.lowPowerMode) ? strncpy(lowPowerModeStr,"True",sizeof(lowPowerModeStr)) : strncpy(lowPowerModeStr,"False",sizeof(lowPowerModeStr));
 
   sensorControl(true);                                                // Turn on the sensors.
 
-  if (sysStatus.sensorType == 0) strcpy(sensorTypeConfigStr,"Pressure Sensor");
-  else if (sysStatus.sensorType == 1) strcpy(sensorTypeConfigStr,"PIR Sensor");
+  if (sysStatus.sensorType == 0) strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
+  else if (sysStatus.sensorType == 1) strncpy(sensorTypeConfigStr,"PIR Sensor",sizeof(sensorTypeConfigStr));
 
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
@@ -645,7 +646,7 @@ void loadSystemDefaults() {                                         // Default s
   sysStatus.openTime = 6;
   sysStatus.closeTime = 21;
   sysStatus.sensorType = 0;                                         // 0 is for pressure sensor , 1 is for PIR sensor
-  strcpy(sensorTypeConfigStr,"Pressure Sensor");
+  strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   fram.put(FRAM::systemStatusAddr,sysStatus);                       // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -657,7 +658,7 @@ void checkSystemValues() {                                          // Checks to
   }
   if (sysStatus.sensorType > 2) {
     sysStatus.sensorType = 0;
-    strcpy(sensorTypeConfigStr,"Pressure Sensor");
+    strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   }
   if (sysStatus.verboseMode < 0 || sysStatus.verboseMode > 1) sysStatus.verboseMode = false;
   if (sysStatus.solarPowerMode < 0 || sysStatus.solarPowerMode >1) sysStatus.solarPowerMode = 1;
@@ -795,7 +796,7 @@ int setSensorType(String command) // Function to force sending data in current h
   if (command == "0")
   {
     sysStatus.sensorType = 0;
-    strcpy(sensorTypeConfigStr,"Pressure Sensor");
+    strncpy(sensorTypeConfigStr,"Pressure Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
     if (Particle.connected()) publishQueue.publish("Mode","Set Sensor Mode to Pressure", PRIVATE);
     
@@ -804,7 +805,7 @@ int setSensorType(String command) // Function to force sending data in current h
   else if (command == "1")
   {
     sysStatus.sensorType = 1;
-    strcpy(sensorTypeConfigStr,"PIR Sensor");
+    strncpy(sensorTypeConfigStr,"PIR Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
     if (Particle.connected()) publishQueue.publish("Mode","Set Sensor Mode to PIR", PRIVATE);
     return 1;
@@ -892,7 +893,7 @@ int setLowPowerMode(String command)                                   // This is
       publishQueue.publish("Mode","Low Power Mode", PRIVATE);
     }
     sysStatus.lowPowerMode = true;
-    strcpy(lowPowerModeStr,"True");
+    strncpy(lowPowerModeStr,"True", sizeof(lowPowerModeStr));
   }
   else if (command == "0")                                            // Command calls for clearing lowPowerMode
   {
@@ -903,7 +904,7 @@ int setLowPowerMode(String command)                                   // This is
     publishQueue.publish("Mode","Normal Operations", PRIVATE);
     delay(1000);                                                      // Need to make sure the message gets out.
     sysStatus.lowPowerMode = false;                                   // update the variable used for console status
-    strcpy(lowPowerModeStr,"False");                                  // Use capitalization so we know that we set this.
+    strncpy(lowPowerModeStr,"False", sizeof(lowPowerModeStr));                                  // Use capitalization so we know that we set this.
   }
   systemStatusWriteNeeded = true;
   return 1;
