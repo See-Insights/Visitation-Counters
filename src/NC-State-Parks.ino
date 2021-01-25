@@ -34,25 +34,6 @@ namespace FRAM {                                    // Moved to namespace instea
 
 const int FRAMversionNumber = 2;                    // Increment this number each time the memory map is changed
 
-struct systemStatus_structure {                     // currently 14 bytes long
-  uint8_t structuresVersion;                        // Version of the data structures (system and data)
-  uint8_t placeholder;                              // available for future use
-  uint8_t clockSet;                                 // Tells us if we need to connect and set the RTC
-  uint8_t connectedStatus;
-  uint8_t verboseMode;
-  uint8_t solarPowerMode;
-  uint8_t lowPowerMode;
-  uint8_t lowBatteryMode;
-  int stateOfCharge;                                // Battery charge level
-  uint8_t batteryState;                               // Stores the current battery state
-  int resetCount;                                   // reset count of device (0-256)
-  float timezone;                                   // Time zone value -12 to +12
-  float dstOffset;                                  // How much does the DST value change?
-  int openTime;                                     // Hour the park opens (0-23)
-  int closeTime;                                    // Hour the park closes (0-23)
-  unsigned long lastHookResponse;                   // Last time we got a valid Webhook response
-  uint8_t sensorType;                               // What is the sensor type - 0-Pressure Sensor, 1-PIR Sensor
-} sysStatus;
 
 struct currentCounts_structure {                    // currently 10 bytes long
   int hourlyCount;                                  // In period hourly count
@@ -75,6 +56,12 @@ std::atomic<uint32_t> dailyAtomic;
 #include "UnitTestCode.h"                           // This code will exercise the device
 #include "PublishQueueAsyncRK.h"                    // Async Particle Publish
 #include <atomic>
+
+// Libraries with helper functions
+#include "time_zone_fn.h"
+#include "sys_status.h"
+
+struct systemStatus_structure sysStatus;
 
 // This is the maximum amount of time to allow for connecting to cloud. If this time is
 // exceeded, do a deep power down. This should not be less than 10 minutes. 11 minutes
@@ -189,7 +176,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("SendNow",sendNow);
   Particle.function("LowPowerMode",setLowPowerMode);
   Particle.function("Solar-Mode",setSolarMode);
-  Particle.function("Verbose-Mode",setverboseMode);
+  Particle.function("Verbose-Mode",setVerboseMode);
   Particle.function("Set-Timezone",setTimeZone);
   Particle.function("Set-DSTOffset",setDSTOffset);
   Particle.function("Set-OpenTime",setOpenTime);
@@ -817,7 +804,19 @@ int setSensorType(String command) // Function to force sending data in current h
   else return 0;
 }
 
-int setverboseMode(String command) // Function to force sending data in current hour
+/**
+ * @brief Turns on/off verbose mode.
+ * 
+ * @details Extracts the integer command. Turns on verbose mode if the command is "1" and turns
+ * off verbose mode if the command is "0".
+ *
+ * @param command A string with the integer command indicating to turn on or off verbose mode.
+ * Only values of "0" or "1" are accepted. Values outside this range will cause the function
+ * to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if successful, 0 if invalid command
+ */
+int setVerboseMode(String command) // Function to force sending data in current hour
 {
   if (command == "1")
   {
@@ -838,27 +837,26 @@ int setverboseMode(String command) // Function to force sending data in current 
   else return 0;
 }
 
-int setTimeZone(String command)
-{
-  char * pEND;
-  char data[256];
-  Particle.syncTime();                                                        // Set the clock each day
-  waitFor(Particle.syncTimeDone,30000);                                       // Wait for up to 30 seconds for the SyncTime to complete
-  int8_t tempTimeZoneOffset = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
-  if ((tempTimeZoneOffset < -12) | (tempTimeZoneOffset > 12)) return 0;       // Make sure it falls in a valid range or send a "fail" result
-  sysStatus.timezone = (float)tempTimeZoneOffset;
-  Time.zone(sysStatus.timezone);
-  systemStatusWriteNeeded = true;                                             // Need to store to FRAM back in the main loop
-  snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
-  if (Particle.connected()) {
-    snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
-    publishQueue.publish("Time",data, PRIVATE);
-    publishQueue.publish("Time",Time.timeStr(Time.now()), PRIVATE);
-  }
-
-  return 1;
+/**
+ * @brief Returns a string describing the battery state.
+ * 
+ * @return String describing battery state.
+ */
+String batteryContextMessage() {
+  return batteryContext[sysStatus.batteryState];
 }
 
+/**
+ * @brief Sets the closing time of the facility.
+ * 
+ * @details Extracts the integer from the string passed in, and sets the closing time of the facility
+ * based on this input. Fails if the input is invalid.
+ *
+ * @param command A string indicating what the closing hour of the facility is in 24-hour time.
+ * Inputs outside of "0" - "24" will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if able to successfully take action, 0 if invalid command
+ */
 int setOpenTime(String command)
 {
   char * pEND;
@@ -874,6 +872,17 @@ int setOpenTime(String command)
   return 1;
 }
 
+/**
+ * @brief Sets the closing time of the facility.
+ * 
+ * @details Extracts the integer from the string passed in, and sets the closing time of the facility
+ * based on this input. Fails if the input is invalid.
+ *
+ * @param command A string indicating what the closing hour of the facility is in 24-hour time.
+ * Inputs outside of "0" - "24" will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if able to successfully take action, 0 if invalid command
+ */
 int setCloseTime(String command)
 {
   char * pEND;
@@ -887,6 +896,18 @@ int setCloseTime(String command)
   return 1;
 }
 
+/**
+ * @brief Toggles the device into low power mode based on the input command.
+ * 
+ * @details If the command is "1", sets the device into low power mode. If the command is "0",
+ * sets the device into normal mode. Fails if neither of these are the inputs.
+ *
+ * @param command A string indicating whether to set the device into low power mode or into normal mode.
+ * A "1" indicates low power mode, a "0" indicates normal mode. Inputs that are neither of these commands
+ * will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if able to successfully take action, 0 if invalid command
+ */
 int setLowPowerMode(String command)                                   // This is where we can put the device into low power mode if needed
 {
   if (command != "1" && command != "0") return 0;                     // Before we begin, let's make sure we have a valid input
@@ -913,6 +934,11 @@ int setLowPowerMode(String command)                                   // This is
   return 1;
 }
 
+/**
+ * @brief Publishes a state transition over serial and to the Particle/Unidash monitoring system.
+ * 
+ * @details A good debugging tool.
+ */
 void publishStateTransition(void)
 {
   char stateTransitionString[40];
@@ -922,7 +948,13 @@ void publishStateTransition(void)
   Serial.println(stateTransitionString);
 }
 
-void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/electronsample
+/**
+ * @brief Fully resets modem.
+ * 
+ * @details Disconnects from the cloud, resets modem and SIM, and deep sleeps for 10 seconds.
+ * Adapted form Rikkas7's https://github.com/rickkas7/electronsample.
+ */
+void fullModemReset() {  // 
 	Particle.disconnect(); 	                                         // Disconnect from the cloud
 	unsigned long startTime = millis();  	                           // Wait up to 15 seconds to disconnect
 	while(Particle.connected() && millis() - startTime < 15000) {
@@ -936,7 +968,13 @@ void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/e
 	System.sleep(SLEEP_MODE_DEEP, 10);
 }
 
-void dailyCleanup() {                                                  // Called from Reporting State ONLY - clean house at the end of the day
+/**
+ * @brief Cleanup function that is run at the end of the day.
+ * 
+ * @details Syncs time with remote service and sets low power mode. Called from Reporting State ONLY.
+ * Clean house at the end of the day
+ */
+void dailyCleanup() {
   publishQueue.publish("Daily Cleanup","Running", PRIVATE);            // Make sure this is being run
   sysStatus.verboseMode = false;
   Particle.syncTime();                                                 // Set the clock each day
@@ -944,94 +982,5 @@ void dailyCleanup() {                                                  // Called
   if (sysStatus.solarPowerMode || sysStatus.stateOfCharge <= 70) {     // If Solar or if the battery is being discharged
     setLowPowerMode("1");
   }
-  systemStatusWriteNeeded=true;
-}
-
-int setDSTOffset(String command) {                                      // This is the number of hours that will be added for Daylight Savings Time 0 (off) - 2
-  char * pEND;
-  char data[256];
-  time_t t = Time.now();
-  int8_t tempDSTOffset = strtol(command,&pEND,10);                      // Looks for the first integer and interprets it
-  if ((tempDSTOffset < 0) | (tempDSTOffset > 2)) return 0;              // Make sure it falls in a valid range or send a "fail" result
-  Time.setDSTOffset((float)tempDSTOffset);                              // Set the DST Offset
-  sysStatus.dstOffset = (float)tempDSTOffset;
   systemStatusWriteNeeded = true;
-  snprintf(data, sizeof(data), "DST offset %2.1f",sysStatus.dstOffset);
-  if (Time.isValid()) isDSTusa() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here
-  snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
-  if (Particle.connected()) {
-    publishQueue.publish("Time",data, PRIVATE);
-    publishQueue.publish("Time",Time.timeStr(t), PRIVATE);
-  }
-  return 1;
-}
-
-bool isDSTusa() {
-  // United States of America Summer Timer calculation (2am Local Time - 2nd Sunday in March/ 1st Sunday in November)
-  // Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
-  // The code works in from months, days and hours in succession toward the two transitions
-  int dayOfMonth = Time.day();
-  int month = Time.month();
-  int dayOfWeek = Time.weekday() - 1; // make Sunday 0 .. Saturday 6
-
-  // By Month - inside or outside the DST window
-  if (month >= 4 && month <= 10)
-  { // April to October definetly DST
-    return true;
-  }
-  else if (month < 3 || month > 11)
-  { // before March or after October is definetly standard time
-    return false;
-  }
-
-  boolean beforeFirstSunday = (dayOfMonth - dayOfWeek < 0);
-  boolean secondSundayOrAfter = (dayOfMonth - dayOfWeek > 7);
-
-  if (beforeFirstSunday && !secondSundayOrAfter) return (month == 11);
-  else if (!beforeFirstSunday && !secondSundayOrAfter) return false;
-  else if (!beforeFirstSunday && secondSundayOrAfter) return (month == 3);
-
-  int secSinceMidnightLocal = Time.now() % 86400;
-  boolean dayStartedAs = (month == 10); // DST in October, in March not
-  // on switching Sunday we need to consider the time
-  if (secSinceMidnightLocal >= 2*3600)
-  { //  In the US, Daylight Time is based on local time
-    return !dayStartedAs;
-  }
-  return dayStartedAs;
-}
-
-bool isDSTnz() {
-  // New Zealand Summer Timer calculation (2am Local Time - last Sunday in September/ 1st Sunday in April)
-  // Adapted from @ScruffR's code posted here https://community.particle.io/t/daylight-savings-problem/38424/4
-  // The code works in from months, days and hours in succession toward the two transitions
-  int dayOfMonth = Time.day();
-  int month = Time.month();
-  int dayOfWeek = Time.weekday() - 1; // make Sunday 0 .. Saturday 6
-
-  // By Month - inside or outside the DST window - 10 out of 12 months with April and Septemper in question
-  if (month >= 10 || month <= 3)
-  { // October to March is definetly DST - 6 months
-    return true;
-  }
-  else if (month < 9 && month > 4)
-  { // before September and after April is definetly standard time - - 4 months
-    return false;
-  }
-
-  boolean beforeFirstSunday = (dayOfMonth - dayOfWeek < 6);
-  boolean lastSundayOrAfter = (dayOfMonth - dayOfWeek > 23);
-
-  if (beforeFirstSunday && !lastSundayOrAfter) return (month == 4);
-  else if (!beforeFirstSunday && !lastSundayOrAfter) return false;
-  else if (!beforeFirstSunday && lastSundayOrAfter) return (month == 9);
-
-  int secSinceMidnightLocal = Time.now() % 86400;
-  boolean dayStartedAs = (month == 10); // DST in October, in March not
-  // on switching Sunday we need to consider the time
-  if (secSinceMidnightLocal >= 2*3600)
-  { //  In the US, Daylight Time is based on local time
-    return !dayStartedAs;
-  }
-  return dayStartedAs;
 }
