@@ -16,13 +16,14 @@
 //v4 - defaults to car counters - norm going forward - note this is only applied with a new device
 //v4.02 - Added watchdog petting to connecttoparticle and got rid of srtcpy
 //v4.03 - Added and out of memory reset into the main loop as recommended in AN023 above
+//v5.00 - Updated and deployed to the Particle product group
 
 
 // Particle Product definitions
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(4);
+PRODUCT_VERSION(5);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="4.03";
+char currentPointRelease[5] ="5.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -411,12 +412,14 @@ void loop()
     currentCountsWriteNeeded = false;
   }
 
-  if (outOfMemory >= 0) {
-    // An out of memory condition occurred - reset device.
-    Log.info("out of memory occurred size=%d", outOfMemory);
+  if (outOfMemory >= 0) {                                             // In this function we are going to reset the system if there is an out of memory error
+    char message[64];
+    snprintf(message, sizeof(message), "Out of memory occurred size=%d",outOfMemory);
+    Log.info(message);
     delay(100);
-
-    System.reset();
+    publishQueue.publish("Memory",message,PRIVATE);                   // Publish to the console - this is important so we will not filter on verboseMod
+    delay(2000);
+    System.reset();                                                   // An out of memory condition occurred - reset device.
   }
 }
 
