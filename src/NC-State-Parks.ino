@@ -524,11 +524,6 @@ void takeMeasurements()
   currentCountsWriteNeeded = true;
 }
 
-String batteryContextMessage() {
-  return batteryContext[sysStatus.batteryState];
-}
-
-
 bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.  
 {     
   sysStatus.batteryState = System.batteryState();
@@ -641,7 +636,6 @@ void loadSystemDefaults() {                                         // Default s
 }
 
 void checkSystemValues() {                                          // Checks to ensure that all system values are in reasonable range 
-  if (sysStatus.clockSet < 0 || sysStatus.clockSet > 1) sysStatus.clockSet = 0;
   if (sysStatus.connectedStatus < 0 || sysStatus.connectedStatus > 1) {
     if (Particle.connected()) sysStatus.connectedStatus = true;
     else sysStatus.connectedStatus = false;
