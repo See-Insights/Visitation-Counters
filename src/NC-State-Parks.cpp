@@ -23,6 +23,7 @@
 //v4.02 - Added watchdog petting to connecttoparticle and got rid of srtcpy
 //v4.03 - Added and out of memory reset into the main loop as recommended in AN023 above
 //v5.00 - Updated and deployed to the Particle product group
+//v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
 
 
 // Particle Product definitions
@@ -60,11 +61,11 @@ int setLowPowerMode(String command);
 void publishStateTransition(void);
 void fullModemReset();
 void dailyCleanup();
-#line 23 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/NC-State-Parks.ino"
+#line 24 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/NC-State-Parks.ino"
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(5);
+PRODUCT_VERSION(6);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="5.00";
+char currentPointRelease[5] ="6.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -74,7 +75,7 @@ namespace FRAM {                                    // Moved to namespace instea
   };
 };
 
-const int FRAMversionNumber = 2;                    // Increment this number each time the memory map is changed
+const int FRAMversionNumber = 3;                    // Increment this number each time the memory map is changed
 
 
 struct currentCounts_structure {                    // currently 10 bytes long
@@ -407,6 +408,7 @@ void loop()
     if (!dataInFlight)  {                                             // Response received back to IDLE state
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
+      if (Time.hour() == 0) resetEverything();                        // It is a new day.  Zero everything so we can start fresh we generally only see this line if we are operating 24 hours
       state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
@@ -674,31 +676,20 @@ void loadSystemDefaults() {                                         // Default s
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
   sysStatus.closeTime = 21;
-  sysStatus.sensorType = 0;                                         // 0 is for pressure sensor , 1 is for PIR sensor
-  strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   fram.put(FRAM::systemStatusAddr,sysStatus);                       // Write it now since this is a big deal and I don't want values over written
 }
 
 void checkSystemValues() {                                          // Checks to ensure that all system values are in reasonable range 
-  if (sysStatus.connectedStatus < 0 || sysStatus.connectedStatus > 1) {
-    if (Particle.connected()) sysStatus.connectedStatus = true;
-    else sysStatus.connectedStatus = false;
-  }
   if (sysStatus.sensorType > 2) {
     sysStatus.sensorType = 0;
     strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   }
-  if (sysStatus.verboseMode < 0 || sysStatus.verboseMode > 1) sysStatus.verboseMode = false;
-  if (sysStatus.solarPowerMode < 0 || sysStatus.solarPowerMode >1) sysStatus.solarPowerMode = 1;
-  if (sysStatus.lowPowerMode < 0 || sysStatus.lowPowerMode > 1) setLowPowerMode("1");
-  if (sysStatus.lowBatteryMode < 0 || sysStatus.lowBatteryMode > 1) sysStatus.lowBatteryMode = 0;
   if (sysStatus.resetCount < 0 || sysStatus.resetCount > 255) sysStatus.resetCount = 0;
   if (sysStatus.timezone < -12 || sysStatus.timezone > 12) sysStatus.timezone = -5;
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
   // None for lastHookResponse
-
   systemStatusWriteNeeded = true;
 }
 
@@ -706,21 +697,50 @@ void checkSystemValues() {                                          // Checks to
  // They are intended to allow for customization and control during installations
  // and to allow for management.
 
+
+/**
+ * @brief Connects to Particle or take steps to recover.
+ * 
+ * @details You can configure the amount of time to fail to connect to the cloud before doing 
+ * a deep power off for 30 seconds. The default is 11 minutes, and you should not set it less 
+ * than 10. You can set it higher if you want.
+ * Code modified from the application watchdog app note: https://github.com/rickkas7/AB1805_RK
+ * 
+ * @return 1 if successful, 0 if uncessful or resets device if it has been over two hours
+ */
 bool connectToParticle() {
-  Cellular.on();
+  unsigned int maxConnectionSeconds = 11 * 60;                             // Should not be less than 10 minutes
+  unsigned long connectionStartTime = Time.now();                 // Start the clock
+  char connectionStr[32];
+
+  Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
   Particle.connect();
-  // wait for *up to* 5 minutes
-  for (int retry = 0; retry < 300 && !waitFor(Particle.connected,1000); retry++) {
-    if(sensorDetect) recordCount(); // service the interrupt every 10 seconds
+
+  for (unsigned int retry = 0; retry < maxConnectionSeconds && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
+    if(sensorDetect) recordCount();                               // service the interrupt every second
     Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
+
   if (Particle.connected()) {
     sysStatus.connectedStatus = true;
+    sysStatus.lastConnection = Time.now();
+    snprintf(connectionStr, sizeof(connectionStr),"Connected in %lu secs",Time.now()-connectionStartTime);
+    Log.info(connectionStr);
+    if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
     systemStatusWriteNeeded = true;
     return 1;                                                     // Were able to connect successfully
   }
   else {
+    sysStatus.connectedStatus = false;
+    Log.info("cloud connection unsuccessful");
+    if (Time.now() - sysStatus.lastConnection > maxConnectionSeconds) {
+        fram.put(FRAM::systemStatusAddr,sysStatus);
+        Log.info("failed to connect to cloud, doing deep reset");
+        delay(100);
+        ab1805.deepPowerDown();
+    }
+    systemStatusWriteNeeded = true;
     return 0;                                                     // Failed to connect
   }
 }
@@ -788,13 +808,18 @@ int sendNow(String command) // Function to force sending data in current hour
   else return 0;
 }
 
-void resetEverything() {                                            // The device is waking up in a new day or is a new install
-  current.dailyCount = 0;                              // Reset the counts in FRAM as well
+/**
+ * @brief Resets all counts to start a new day.
+ * 
+ * @details Once run, it will reset all daily-specific counts and trigger an update in FRAM.
+ */
+void resetEverything() {                                              // The device is waking up in a new day or is a new install
+  current.dailyCount = 0;                                             // Reset the counts in FRAM as well
   current.hourlyCount = 0;
   current.hourlyCountInFlight = 0;
-  current.lastCountTime = Time.now();                      // Set the time context to the new day
-  sysStatus.resetCount = current.alertCount = 0;           // Reset everything for the day
-  currentCountsWriteNeeded=true;
+  current.lastCountTime = Time.now();                                 // Set the time context to the new day
+  sysStatus.resetCount = current.alertCount = 0;                      // Reset everything for the day
+  currentCountsWriteNeeded=true;                                      // Make sure that the values are updated in FRAM
   systemStatusWriteNeeded=true;
 }
 
