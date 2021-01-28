@@ -111,7 +111,7 @@ unsigned long stayAwake;                            // Stores the time we need t
 unsigned long webhookTimeStamp = 0;                 // Webhooks...
 unsigned long resetTimeStamp = 0;                   // Resets - this keeps you from falling into a reset loop
 char currentOffsetStr[10];                          // What is our offset from UTC
-int currentHourlyPeriod = 0;                        // Need to keep this separate from time so we know when to report
+unsigned long lastReportedTime = 0;                        // Need to keep this separate from time so we know when to report
 char sensorTypeConfigStr[16];
 
 // Program Variables
@@ -247,8 +247,8 @@ void setup()                                        // Note: Disconnected Setup(
   }
 
   // Done with the System Stuff - now we will focus on the current counts values
-  if (current.hourlyCount) currentHourlyPeriod = Time.hour(current.lastCountTime);
-  else currentHourlyPeriod = Time.hour();                              // The local time hourly period for reporting purposes
+  if (current.hourlyCount) lastReportedTime = current.lastCountTime;
+  else lastReportedTime = Time.now();                              // The local time hourly period for reporting purposes
 
   setPowerConfig();                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
 
@@ -287,8 +287,9 @@ void loop()
       current.hourlyCountInFlight = current.maxMinValue = current.alertCount = 0; // Zero out the counts until next reporting period
       currentCountsWriteNeeded=true;
     }
+    if (sensorDetect) recordCount();                                  // The ISR had raised the sensor flag
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
-    if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
+    if (Time.hour() != Time.hour(lastReportedTime)) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
     if ((Time.hour() >= sysStatus.closeTime || Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
     break;
 
@@ -364,11 +365,17 @@ void loop()
 
   case RESP_WAIT_STATE:
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
-    if (!dataInFlight)  {                                             // Response received back to IDLE state
+    if (!dataInFlight)  {                                             // Response received --> back to IDLE state
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
       if (Time.hour() == 0) resetEverything();                        // It is a new day.  Zero everything so we can start fresh we generally only see this line if we are operating 24 hours
       state = IDLE_STATE;
+
+      if (current.hourlyCountInFlight) {                                // Cleared here as there could be counts coming in while "in Flight"
+        current.hourlyCount -= current.hourlyCountInFlight;             // Confirmed that count was recevied - clearing
+        current.hourlyCountInFlight = current.maxMinValue = current.alertCount = 0; // Zero out the counts until next reporting period
+        currentCountsWriteNeeded=true;
+      }
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
@@ -486,14 +493,18 @@ void recordCount() // This is where we check to see if an interrupt is set when 
 
 void sendEvent() {
   char data[256];                                                     // Store the date in this character array - not global
-  unsigned long timeStampValue = Time.now();                          // Going to start sending timestamps - and will modify for midnight to fix reporting issue
-  int secondsPastHour = timeStampValue % 3600;
-  timeStampValue = timeStampValue - (secondsPastHour + 1);            // This ensures that the midnight report is back-dated 5 minutes 
+  unsigned long timeStampValue;                                       // Going to start sending timestamps - and will modify for midnight to fix reporting issue
+  if (current.hourlyCount) {
+    timeStampValue = current.lastCountTime;                           // If there was an event in the past hour, send the most recent event's timestamp
+  }
+  else {                                                              // If there were no events in the past hour/recording period, send the time when the last report was sent
+    timeStampValue = lastReportedTime;                                // This should be the beginning of the previous hour
+  }
   snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,  \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i, \"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alertCount, current.maxMinValue, timeStampValue);
   publishQueue.publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
   dataInFlight = true;                                                // set the data inflight flag
   webhookTimeStamp = millis();
-  currentHourlyPeriod = Time.hour();
+  lastReportedTime = Time.now();
   current.hourlyCountInFlight = current.hourlyCount;                  // This is the number that was sent to Ubidots - will be subtracted once we get confirmation
 }
 
