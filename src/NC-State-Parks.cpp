@@ -44,7 +44,7 @@ void countSignalTimerISR();
 int setPowerConfig();
 void loadSystemDefaults();
 void checkSystemValues();
-bool connectToParticle();
+bool connectToParticleBlocking();
 bool disconnectFromParticle();
 bool notConnected();
 int resetFRAM(String command);
@@ -267,7 +267,7 @@ void setup()                                        // Note: Disconnected Setup(
     Time.setTime(RTCTime);
   }
   else {                                                               // Special case, neither the RTC or the system clock is set, we need to connect and get the time
-    connectToParticle();
+    connectToParticleBlocking();
     Particle.syncTime();                                               // Set the system clock here
   }
 
