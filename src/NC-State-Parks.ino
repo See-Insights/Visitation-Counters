@@ -106,7 +106,6 @@ const int wakeBoundary = 1*3600 + 0*60 + 0;         // 1 hour 0 minutes 0 second
 const unsigned long stayAwakeLong = 90000;          // In lowPowerMode, how long to stay awake every hour
 const unsigned long webhookWait = 30000;            // How long will we wait for a WebHook response
 const unsigned long resetWait = 30000;              // How long will we wait in ERROR_STATE until reset
-const unsigned long particleConnectWait = 11 * 60;
 unsigned long stayAwakeTimeStamp = 0;               // Timestamps for our timing variables..
 unsigned long stayAwake;                            // Stores the time we need to wait before napping
 unsigned long webhookTimeStamp = 0;                 // Webhooks...
