@@ -283,6 +283,7 @@ void loop()
 {
   switch(state) {
   case PARTICLE_CONNECT_STATE:                                          // Will currently always come from REPORTING_STATE when not connected
+    if (sysStatus.verboseMode && state != oldState) publishStateTransition();
     if (!waitingForConnection) {                                        // Must be just entering this state -> should only be run once when connecting
       connectionStartTime = millis();
       Cellular.on();                                                    // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
@@ -324,7 +325,7 @@ void loop()
     if (Time.hour() != Time.hour(lastReportedTime)) {
       state = REPORTING_STATE;                                        // We want to report on the hour but not after bedtime
     }
-    if ((Time.hour() >= sysStatus.closeTime || Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
+    if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
     break;
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
