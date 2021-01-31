@@ -679,7 +679,7 @@ void loadSystemDefaults() {                                         // Default s
   connectToParticleBlocking();                                              // Get connected to Particle - sets sysStatus.connectedStatus to true
   if (Particle.connected()) publishQueue.publish("Mode","Loading System Defaults", PRIVATE);
   sysStatus.structuresVersion = 1;
-  sysStatus.verboseMode = false;
+  sysStatus.verboseMode = true;
   sysStatus.clockSet = false;
   sysStatus.lowBatteryMode = false;
   setLowPowerMode("1");
