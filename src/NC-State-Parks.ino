@@ -19,13 +19,14 @@
 //v5.00 - Updated and deployed to the Particle product group
 //v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
 //v7.00 - Fix for "white light bug".  
+//v8.00 - Simpler setup() and new state for connecting to particle cloud
 
 
 // Particle Product definitions
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(7);
+PRODUCT_VERSION(8);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="7.00";
+char currentPointRelease[5] ="8.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -266,7 +267,7 @@ void setup()                                        // Note: Disconnected Setup(
   if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) { // Park is open let's get ready for the day                                                            
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) {         // If the system thinks we are connected, let's make sure that we are
-      connectToParticleBlocking();
+      connectToParticleBlocking();                                    // This may happen if there was an unexpected reset during park open hours
     }
     takeMeasurements();                                               // Populates values so you can read them before the hour
     stayAwake = stayAwakeLong;                                        // Keeps Boron awake after reboot - helps with recovery
@@ -319,12 +320,6 @@ void loop()
 
   case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
-    if (current.hourlyCountInFlight) {                                // Cleared here as there could be counts coming in while "in Flight"
-      current.hourlyCount -= current.hourlyCountInFlight;             // Confirmed that count was recevied - clearing
-      current.hourlyCountInFlight = current.maxMinValue = current.alertCount = 0; // Zero out the counts until next reporting period
-      currentCountsWriteNeeded=true;
-    }
-    if (sensorDetect) recordCount();                                  // The ISR had raised the sensor flag
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
     if (Time.hour() != Time.hour(lastReportedTime)) {
       state = REPORTING_STATE;                                        // We want to report on the hour but not after bedtime

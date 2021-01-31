@@ -361,12 +361,6 @@ void loop()
 
   case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
-    if (current.hourlyCountInFlight) {                                // Cleared here as there could be counts coming in while "in Flight"
-      current.hourlyCount -= current.hourlyCountInFlight;             // Confirmed that count was recevied - clearing
-      current.hourlyCountInFlight = current.maxMinValue = current.alertCount = 0; // Zero out the counts until next reporting period
-      currentCountsWriteNeeded=true;
-    }
-    if (sensorDetect) recordCount();                                  // The ISR had raised the sensor flag
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;  // When in low power mode, we can nap between taps
     if (Time.hour() != Time.hour(lastReportedTime)) {
       state = REPORTING_STATE;                                        // We want to report on the hour but not after bedtime
