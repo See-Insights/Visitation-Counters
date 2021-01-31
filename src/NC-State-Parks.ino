@@ -23,9 +23,9 @@
 
 // Particle Product definitions
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(6);
+PRODUCT_VERSION(7);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="6.00";
+char currentPointRelease[5] ="7.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
