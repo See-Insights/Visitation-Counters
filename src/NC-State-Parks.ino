@@ -400,7 +400,7 @@ void loop()
     }
     break;
 
-  case RESP_WAIT_STATE: // TODO: not checking for sensorDetect in this state??
+  case RESP_WAIT_STATE:
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
     if (!dataInFlight)  {                                             // Response received --> back to IDLE state
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
