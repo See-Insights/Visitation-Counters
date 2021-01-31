@@ -24,6 +24,7 @@
 //v4.03 - Added and out of memory reset into the main loop as recommended in AN023 above
 //v5.00 - Updated and deployed to the Particle product group
 //v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
+//v7.00 - Fix for "white light bug".  
 
 
 // Particle Product definitions
@@ -61,7 +62,7 @@ int setLowPowerMode(String command);
 void publishStateTransition(void);
 void fullModemReset();
 void dailyCleanup();
-#line 24 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/NC-State-Parks.ino"
+#line 25 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/NC-State-Parks.ino"
 PRODUCT_ID(12529);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(6);
 #define DSTRULES isDSTusa
@@ -322,7 +323,6 @@ void loop()
   switch(state) {
   case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
     if (sysStatus.verboseMode && state != oldState) publishStateTransition();
-    if (sensorDetect) recordCount();                                  // The ISR had raised the sensor flag
     if (current.hourlyCountInFlight) {                                // Cleared here as there could be counts coming in while "in Flight"
       current.hourlyCount -= current.hourlyCountInFlight;             // Confirmed that count was recevied - clearing
       current.hourlyCountInFlight = current.maxMinValue = current.alertCount = 0; // Zero out the counts until next reporting period
@@ -444,6 +444,9 @@ void loop()
     break;
   }
   // Take care of housekeeping items here
+
+  if (sensorDetect) recordCount();                                    // The ISR had raised the sensor flag - this will service interrupts regardless of state
+  
   ab1805.loop();                                                      // Keeps the RTC synchronized with the Boron's clock
 
   if (systemStatusWriteNeeded) {
