@@ -1,6 +1,9 @@
 # CPP Generated File by Particle Workbench during Compilation
 ./src/NC-State-Parks.cpp
 
+# VSCode Settings File
+./.vscode/settings.json
+
 # Prerequisites
 *.d
 
