@@ -294,7 +294,7 @@ void loop()
       char connectionStr[32];
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();
-      snprintf(connectionStr, sizeof(connectionStr),"Connected in %lu secs", millis()-connectionStartTime);
+      snprintf(connectionStr, sizeof(connectionStr),"Connected in %lu secs", (millis()-connectionStartTime)/1000);
       Log.info(connectionStr);
       if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
       systemStatusWriteNeeded = true;
@@ -679,7 +679,7 @@ void loadSystemDefaults() {                                         // Default s
   connectToParticleBlocking();                                              // Get connected to Particle - sets sysStatus.connectedStatus to true
   if (Particle.connected()) publishQueue.publish("Mode","Loading System Defaults", PRIVATE);
   sysStatus.structuresVersion = 1;
-  sysStatus.verboseMode = true;
+  sysStatus.verboseMode = false;
   sysStatus.clockSet = false;
   sysStatus.lowBatteryMode = false;
   setLowPowerMode("1");
