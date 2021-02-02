@@ -15,10 +15,11 @@ struct systemStatus_structure {
   int resetCount;                                   // reset count of device (0-256)
   float timezone;                                   // Time zone value -12 to +12
   float dstOffset;                                  // How much does the DST value change?
-  int openTime;                                     // Hour the park opens (0-23)
-  int closeTime;                                    // Hour the park closes (0-23)
+  uint8_t openTime;                                 // Hour the park opens (0-23)
+  uint8_t closeTime;                                // Hour the park closes (0-23)
   unsigned long lastHookResponse;                   // Last time we got a valid Webhook response
   unsigned long lastConnection;                     // Last time we successfully connected to Particle
+  uint16_t lastConnectionDuration;                  // How long - in seconds - did it take to last connect to the Particle cloud
   uint8_t sensorType;                               // What is the sensor type - 0-Pressure Sensor, 1-PIR Sensor
 };
 

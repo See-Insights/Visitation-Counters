@@ -19,7 +19,7 @@
 //v5.00 - Updated and deployed to the Particle product group
 //v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
 //v7.00 - Fix for "white light bug".  
-//v8.00 - Simpler setup() and new state for connecting to particle cloud
+//v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
 
 
 // Particle Product definitions
@@ -294,7 +294,8 @@ void loop()
       char connectionStr[32];
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();
-      snprintf(connectionStr, sizeof(connectionStr),"Connected in %lu secs", (millis()-connectionStartTime)/1000);
+      sysStatus.lastConnectionDuration = (millis()-connectionStartTime)/1000;   // How long - in seconds - did it take to connect
+      snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs", sysStatus.lastConnectionDuration);
       Log.info(connectionStr);
       if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
       systemStatusWriteNeeded = true;
@@ -538,7 +539,7 @@ void sendEvent() {
   else {                                                              // If there were no events in the past hour/recording period, send the time when the last report was sent
     timeStampValue = lastReportedTime;                                // This should be the beginning of the previous hour
   }
-  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,  \"key1\":\"%s\", \"temp\":%i, \"resets\":%i, \"alerts\":%i, \"maxmin\":%i, \"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alertCount, current.maxMinValue, timeStampValue);
+  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alertCount, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
   publishQueue.publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
   dataInFlight = true;                                                // set the data inflight flag
   webhookTimeStamp = millis();
@@ -736,7 +737,8 @@ bool connectToParticleBlocking() {
   if (Particle.connected()) {
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
-    snprintf(connectionStr, sizeof(connectionStr),"Connected in %lu secs",Time.now()-connectionStartTime);
+    sysStatus.lastConnectionDuration = Time.now()-connectionStartTime;
+    snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);
     Log.info(connectionStr);
     if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
     systemStatusWriteNeeded = true;
