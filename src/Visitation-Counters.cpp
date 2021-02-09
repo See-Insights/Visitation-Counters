@@ -3,7 +3,7 @@
 /******************************************************/
 
 #include "Particle.h"
-#line 1 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/Visitation-Counters.ino"
+#line 1 "/Users/chipmc/Documents/Maker/Particle/Projects/Visitation-Counters/src/Visitation-Counters.ino"
 /*
 * Project NC-State-Parks - new carrier for NC State Parks contract
 * Description: Cellular Connected Data Logger for Utility and Solar powered installations
@@ -26,9 +26,11 @@
 //v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
 //v7.00 - Fix for "white light bug".  
 //v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
+//v9.00 - Testing some new features; 1) No ProductID!  2) bounds check on connect time, 3) Function to support seeding a daily value 4) Deleted unused "reset FRAM" function
 
 
 // Particle Product definitions
+// PRODUCT_ID(12529);                               // Boron Connected Counter Header
 void setup();
 void loop();
 void sensorControl(bool enableSensor);
@@ -48,7 +50,6 @@ void checkSystemValues();
 bool connectToParticleBlocking();
 bool disconnectFromParticle();
 bool notConnected();
-int resetFRAM(String command);
 int resetCounts(String command);
 int hardResetNow(String command);
 int sendNow(String command);
@@ -59,15 +60,16 @@ int setVerboseMode(String command);
 String batteryContextMessage();
 int setOpenTime(String command);
 int setCloseTime(String command);
+int setDailyCount(String command);
 int setLowPowerMode(String command);
 void publishStateTransition(void);
 void fullModemReset();
 void dailyCleanup();
-#line 26 "/Users/chipmc/Documents/Maker/Particle/Projects/NC-State-Parks/src/Visitation-Counters.ino"
-PRODUCT_ID(12529);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(8);
+#line 28 "/Users/chipmc/Documents/Maker/Particle/Projects/Visitation-Counters/src/Visitation-Counters.ino"
+PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
+PRODUCT_VERSION(9);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="8.00";
+char currentPointRelease[5] ="9.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -218,7 +220,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("BatteryContext",batteryContextMessage);
   Particle.variable("SensorStatus",sensorTypeConfigStr);
 
-  Particle.function("resetFRAM", resetFRAM);                          // These are the functions exposed to the mobile app and console
+  Particle.function("setDailyCount", setDailyCount);                          // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
   Particle.function("HardReset",hardResetNow);
   Particle.function("SendNow",sendNow);
@@ -336,6 +338,7 @@ void loop()
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();
       sysStatus.lastConnectionDuration = (millis()-connectionStartTime)/1000;   // How long - in seconds - did it take to connect
+      if (sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
       snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs", sysStatus.lastConnectionDuration);
       Log.info(connectionStr);
       if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
@@ -762,14 +765,13 @@ void checkSystemValues() {                                          // Checks to
  * @return 1 if successful, 0 if uncessful or resets device if it has been over two hours
  */
 bool connectToParticleBlocking() {
-  unsigned int maxConnectionSeconds = 11 * 60;                             // Should not be less than 10 minutes
   unsigned long connectionStartTime = Time.now();                 // Start the clock
   char connectionStr[32];
 
   Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
   Particle.connect();
 
-  for (unsigned int retry = 0; retry < maxConnectionSeconds && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
+  for (unsigned int retry = 0; retry < connectionTimeout && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
     if(sensorDetect) recordCount();                               // service the interrupt every second
     Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
@@ -779,6 +781,7 @@ bool connectToParticleBlocking() {
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
     sysStatus.lastConnectionDuration = Time.now()-connectionStartTime;
+    if (sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
     snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);
     Log.info(connectionStr);
     if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
@@ -788,7 +791,7 @@ bool connectToParticleBlocking() {
   else {
     sysStatus.connectedStatus = false;
     Log.info("cloud connection unsuccessful");
-    if (Time.now() - sysStatus.lastConnection > maxConnectionSeconds) {
+    if (Time.now() - sysStatus.lastConnection > connectionTimeout) {
         fram.put(FRAM::systemStatusAddr,sysStatus);
         Log.info("failed to connect to cloud, doing deep reset");
         delay(100);
@@ -812,16 +815,6 @@ bool disconnectFromParticle()                                     // Ensures we 
 
 bool notConnected() {                                             // Companion function for disconnectFromParticle
   return !Particle.connected();
-}
-
-int resetFRAM(String command)                                     // Will reset the local counts
-{
-  if (command == "1")
-  {
-    fram.erase();
-    return 1;
-  }
-  else return 0;
 }
 
 int resetCounts(String command)                                       // Resets the current hourly and daily counts
@@ -1011,6 +1004,34 @@ int setCloseTime(String command)
   systemStatusWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",sysStatus.closeTime);
   if (Particle.connected()) publishQueue.publish("Time",data, PRIVATE);
+  return 1;
+}
+
+/**
+ * @brief Sets the daily count for the park - useful when you are replacing sensors.
+ * 
+ * @details Since the hourly counts are not retained after posting to Ubidots, seeding a value for
+ * the daily counts will enable us to follow this process to replace an old counter: 1) Execute the "send now"
+ * command on the old sensor.  Note the daily count.  2) Install the new sensor and perform tests to ensure
+ * it is counting correclty.  3) Use this function to set the daily count to the right value and put the 
+ * new device into operation.
+ *
+ * @param command A string for the new daily count.  
+ * Inputs outside of "0" - "1000" will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if able to successfully take action, 0 if invalid command
+ */
+int setDailyCount(String command)
+{
+  char * pEND;
+  char data[256];
+  int tempCount = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
+  if ((tempCount < 0) || (tempCount > 1000)) return 0;   // Make sure it falls in a valid range or send a "fail" result
+  current.dailyCount = tempCount;
+  current.lastCountTime = Time.now();
+  currentCountsWriteNeeded = true;                          // Store the new value in FRAMwrite8
+  snprintf(data, sizeof(data), "Daily count set to %i",current.dailyCount);
+  if (Particle.connected()) publishQueue.publish("Daily",data, PRIVATE);
   return 1;
 }
 
