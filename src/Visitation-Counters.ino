@@ -125,6 +125,8 @@ bool dataInFlight = false;                          // Tracks if we have sent da
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 char batteryContextStr[16];                         // Tracks the battery context
 char lowPowerModeStr[6];                            // In low power mode?
+char openTimeStr[8]="NA";                              // Park Open Time
+char closeTimeStr[8]="NA";                             // Park close Time
 bool systemStatusWriteNeeded = false;               // Keep track of when we need to write
 bool currentCountsWriteNeeded = false;
 bool waitingForConnection = false;
@@ -172,8 +174,8 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("Release",currentPointRelease);
   Particle.variable("stateOfChg", sysStatus.stateOfCharge);
   Particle.variable("lowPowerMode",lowPowerModeStr);
-  Particle.variable("OpenTime",sysStatus.openTime);
-  Particle.variable("CloseTime",sysStatus.closeTime);
+  Particle.variable("OpenTime", openTimeStr);
+  Particle.variable("CloseTime",closeTimeStr);
   Particle.variable("Alerts",current.alertCount);
   Particle.variable("TimeOffset",currentOffsetStr);
   Particle.variable("BatteryContext",batteryContextMessage);
@@ -212,6 +214,8 @@ void setup()                                        // Note: Disconnected Setup(
   }
 
   checkSystemValues();                                                // Make sure System values are all in valid range
+
+  makeUpParkHourStrings();                                                    // Create the strings for the console
 
   // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
   System.on(out_of_memory, outOfMemoryHandler);
@@ -691,6 +695,7 @@ void loadSystemDefaults() {                                         // Default s
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
   sysStatus.closeTime = 21;
+  sysStatus.lastConnectionDuration = 0;                             // New measure
   fram.put(FRAM::systemStatusAddr,sysStatus);                       // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -704,6 +709,7 @@ void checkSystemValues() {                                          // Checks to
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
+  if (sysStatus.lastConnectionDuration < 0 || sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
   // None for lastHookResponse
   systemStatusWriteNeeded = true;
 }
@@ -712,6 +718,24 @@ void checkSystemValues() {                                          // Checks to
  // They are intended to allow for customization and control during installations
  // and to allow for management.
 
+ /**
+  * @brief Simple Function to construct a string for the Open and Close Time
+  * 
+  * @details Looks at the open and close time and makes them into time strings.  Also looks at the special case of open 24 hours
+  * and puts in an "NA" for both strings when this is the case.
+  * 
+  */
+void makeUpParkHourStrings() {
+  if (sysStatus.openTime == 0 && sysStatus.closeTime == 24) {
+    snprintf(openTimeStr, sizeof(openTimeStr), "NA");
+    snprintf(closeTimeStr, sizeof(closeTimeStr), "NA");
+    return;
+  }
+    
+  snprintf(openTimeStr, sizeof(openTimeStr), "%i:00", sysStatus.openTime);
+  snprintf(closeTimeStr, sizeof(closeTimeStr), "%i:00", sysStatus.closeTime);
+  return;
+}
 
 /**
  * @brief Connects to Particle or take steps to recover.
@@ -934,6 +958,7 @@ int setOpenTime(String command)
   int tempTime = strtol(command,&pEND,10);                                    // Looks for the first integer and interprets it
   if ((tempTime < 0) || (tempTime > 23)) return 0;                            // Make sure it falls in a valid range or send a "fail" result
   sysStatus.openTime = tempTime;
+  makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                                            // Need to store to FRAM back in the main loop
   if (Particle.connected()) {
     snprintf(data, sizeof(data), "Open time set to %i",sysStatus.openTime);
@@ -960,6 +985,7 @@ int setCloseTime(String command)
   int tempTime = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
   if ((tempTime < 0) || (tempTime > 24)) return 0;   // Make sure it falls in a valid range or send a "fail" result
   sysStatus.closeTime = tempTime;
+  makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",sysStatus.closeTime);
   if (Particle.connected()) publishQueue.publish("Time",data, PRIVATE);
