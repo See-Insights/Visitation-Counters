@@ -21,6 +21,7 @@
 //v7.00 - Fix for "white light bug".  
 //v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
 //v9.00 - Testing some new features; 1) No ProductID!  2) bounds check on connect time, 3) Function to support seeding a daily value 4) Deleted unused "reset FRAM" function
+//v9.01 - Updated .gitignore, removed lastConnectDuration unneeded tests
 
 
 // Particle Product definitions
@@ -28,7 +29,7 @@
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(9);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="9.00";
+char currentPointRelease[5] ="9.01";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -301,7 +302,6 @@ void loop()
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();
       sysStatus.lastConnectionDuration = (millis()-connectionStartTime)/1000;   // How long - in seconds - did it take to connect
-      if (sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
       snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs", sysStatus.lastConnectionDuration);
       Log.info(connectionStr);
       if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
@@ -317,8 +317,8 @@ void loop()
       fram.put(FRAM::systemStatusAddr,sysStatus);
       Log.warn("failed to connect to cloud, doing deep reset");
       delay(100);
-      ab1805.deepPowerDown();
-      systemStatusWriteNeeded = true;
+      ab1805.deepPowerDown();                                           // Power cycle device and all peripherals - execution goes back to setup()
+      systemStatusWriteNeeded = true;                                   // leaving for now but this line and next two are never reached
       resetTimeStamp = millis();
       state = ERROR_STATE;
     }
@@ -760,28 +760,26 @@ bool connectToParticleBlocking() {
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
 
-  if (Particle.connected()) {
+  if (Particle.connected()) {                                     // We were able to connect within the alotted time. record the event and publish
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
     sysStatus.lastConnectionDuration = Time.now()-connectionStartTime;
-    if (sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
     snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);
     Log.info(connectionStr);
     if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
     systemStatusWriteNeeded = true;
     return 1;                                                     // Were able to connect successfully
   }
-  else {
+  else {                                                          // We did not connect in time.  Record the event and to an "enable" pin reset of the device (modem too)
     sysStatus.connectedStatus = false;
     Log.info("cloud connection unsuccessful");
     if (Time.now() - sysStatus.lastConnection > connectionTimeout) {
         fram.put(FRAM::systemStatusAddr,sysStatus);
         Log.info("failed to connect to cloud, doing deep reset");
         delay(100);
-        ab1805.deepPowerDown();
+        ab1805.deepPowerDown();                                   // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
     }
-    systemStatusWriteNeeded = true;
-    return 0;                                                     // Failed to connect
+    return 0;                                                     // Failed to connect will never get to this line
   }
 }
 
@@ -875,7 +873,17 @@ int setSolarMode(String command) // Function to force sending data in current ho
   else return 0;
 }
 
-int setSensorType(String command) // Function to force sending data in current hour
+/**
+ * @brief Set the Sensor Type object
+ * 
+ * @details Over time, we may want to develop and deploy other sensot types.  The idea of this code is to allow us to select the sensor
+ * we want via the console so all devices can run the same code.
+ * 
+ * @param Passes a string equal to "0" for pressure sensor and "1" for PIR sensor.  More sensor types possible in the future.
+ * 
+ * @return returns 1 if successful and 0 if not.
+ */
+int setSensorType(String command)                                     // Function to force sending data in current hour
 {
   if (command == "0")
   {
