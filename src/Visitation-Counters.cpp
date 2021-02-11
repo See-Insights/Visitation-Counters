@@ -27,6 +27,7 @@
 //v7.00 - Fix for "white light bug".  
 //v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
 //v9.00 - Testing some new features; 1) No ProductID!  2) bounds check on connect time, 3) Function to support seeding a daily value 4) Deleted unused "reset FRAM" function
+//v9.01 - Updated .gitignore, removed lastConnectDuration unneeded tests
 
 
 // Particle Product definitions
@@ -66,7 +67,7 @@ int setLowPowerMode(String command);
 void publishStateTransition(void);
 void fullModemReset();
 void dailyCleanup();
-#line 28 "/Users/chipmc/Documents/Maker/Particle/Projects/Visitation-Counters/src/Visitation-Counters.ino"
+#line 29 "/Users/chipmc/Documents/Maker/Particle/Projects/Visitation-Counters/src/Visitation-Counters.ino"
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(9);
 #define DSTRULES isDSTusa
@@ -216,8 +217,8 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("Release",currentPointRelease);
   Particle.variable("stateOfChg", sysStatus.stateOfCharge);
   Particle.variable("lowPowerMode",lowPowerModeStr);
-  Particle.variable("OpenTime", sysStatus.openTime);
-  Particle.variable("CloseTime",sysStatus.closeTime);
+  Particle.variable("OpenTime", openTimeStr);
+  Particle.variable("CloseTime",closeTimeStr);
   Particle.variable("Alerts",current.alertCount);
   Particle.variable("TimeOffset",currentOffsetStr);
   Particle.variable("BatteryContext",batteryContextMessage);
@@ -256,6 +257,8 @@ void setup()                                        // Note: Disconnected Setup(
   }
 
   checkSystemValues();                                                // Make sure System values are all in valid range
+
+  makeUpParkHourStrings();                                                    // Create the strings for the console
 
   // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
   System.on(out_of_memory, outOfMemoryHandler);
@@ -341,7 +344,6 @@ void loop()
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();
       sysStatus.lastConnectionDuration = (millis()-connectionStartTime)/1000;   // How long - in seconds - did it take to connect
-      if (sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
       snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs", sysStatus.lastConnectionDuration);
       Log.info(connectionStr);
       if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
@@ -357,8 +359,8 @@ void loop()
       fram.put(FRAM::systemStatusAddr,sysStatus);
       Log.warn("failed to connect to cloud, doing deep reset");
       delay(100);
-      ab1805.deepPowerDown();
-      systemStatusWriteNeeded = true;
+      ab1805.deepPowerDown();                                           // Power cycle device and all peripherals - execution goes back to setup()
+      systemStatusWriteNeeded = true;                                   // leaving for now but this line and next two are never reached
       resetTimeStamp = millis();
       state = ERROR_STATE;
     }
@@ -800,28 +802,26 @@ bool connectToParticleBlocking() {
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
 
-  if (Particle.connected()) {
+  if (Particle.connected()) {                                     // We were able to connect within the alotted time. record the event and publish
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
     sysStatus.lastConnectionDuration = Time.now()-connectionStartTime;
-    if (sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
     snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);
     Log.info(connectionStr);
     if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
     systemStatusWriteNeeded = true;
     return 1;                                                     // Were able to connect successfully
   }
-  else {
+  else {                                                          // We did not connect in time.  Record the event and to an "enable" pin reset of the device (modem too)
     sysStatus.connectedStatus = false;
     Log.info("cloud connection unsuccessful");
     if (Time.now() - sysStatus.lastConnection > connectionTimeout) {
         fram.put(FRAM::systemStatusAddr,sysStatus);
         Log.info("failed to connect to cloud, doing deep reset");
         delay(100);
-        ab1805.deepPowerDown();
+        ab1805.deepPowerDown();                                   // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
     }
-    systemStatusWriteNeeded = true;
-    return 0;                                                     // Failed to connect
+    return 0;                                                     // Failed to connect will never get to this line
   }
 }
 
@@ -998,6 +998,7 @@ int setOpenTime(String command)
   int tempTime = strtol(command,&pEND,10);                                    // Looks for the first integer and interprets it
   if ((tempTime < 0) || (tempTime > 23)) return 0;                            // Make sure it falls in a valid range or send a "fail" result
   sysStatus.openTime = tempTime;
+  makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                                            // Need to store to FRAM back in the main loop
   if (Particle.connected()) {
     snprintf(data, sizeof(data), "Open time set to %i",sysStatus.openTime);
@@ -1024,6 +1025,7 @@ int setCloseTime(String command)
   int tempTime = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
   if ((tempTime < 0) || (tempTime > 24)) return 0;   // Make sure it falls in a valid range or send a "fail" result
   sysStatus.closeTime = tempTime;
+  makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",sysStatus.closeTime);
   if (Particle.connected()) publishQueue.publish("Time",data, PRIVATE);

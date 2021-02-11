@@ -1,8 +1,11 @@
 # CPP Generated File by Particle Workbench during Compilation
-src/NC-State-Parks.cpp
+src/Visitation-Counters.cpp
 
 # VSCode Settings File
 .vscode/settings.json
+
+# Particle Compiled Binanries
+target/
 
 # Prerequisites
 *.d
