@@ -22,6 +22,7 @@
 //v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
 //v9.00 - Testing some new features; 1) No ProductID!  2) bounds check on connect time, 3) Function to support seeding a daily value 4) Deleted unused "reset FRAM" function
 //v9.01 - Updated .gitignore, removed lastConnectDuration unneeded tests
+//v9.02 - Only a minor fix of a DOXYGEN comment
 
 
 // Particle Product definitions
@@ -879,7 +880,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
  * @details Over time, we may want to develop and deploy other sensot types.  The idea of this code is to allow us to select the sensor
  * we want via the console so all devices can run the same code.
  * 
- * @param Passes a string equal to "0" for pressure sensor and "1" for PIR sensor.  More sensor types possible in the future.
+ * @param command a string equal to "0" for pressure sensor and "1" for PIR sensor.  More sensor types possible in the future.
  * 
  * @return returns 1 if successful and 0 if not.
  */
