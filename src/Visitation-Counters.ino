@@ -20,13 +20,17 @@
 //v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
 //v7.00 - Fix for "white light bug".  
 //v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
+//v9.00 - Testing some new features; 1) No ProductID!  2) bounds check on connect time, 3) Function to support seeding a daily value 4) Deleted unused "reset FRAM" function
+//v9.01 - Updated .gitignore, removed lastConnectDuration unneeded tests
+//v9.02 - Only a minor fix of a DOXYGEN comment
 
 
 // Particle Product definitions
-PRODUCT_ID(12529);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(8);
+// PRODUCT_ID(12529);                               // Boron Connected Counter Header
+PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
+PRODUCT_VERSION(9);
 #define DSTRULES isDSTusa
-char currentPointRelease[5] ="8.00";
+char currentPointRelease[5] ="9.01";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -123,6 +127,8 @@ bool dataInFlight = false;                          // Tracks if we have sent da
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 char batteryContextStr[16];                         // Tracks the battery context
 char lowPowerModeStr[6];                            // In low power mode?
+char openTimeStr[8]="NA";                              // Park Open Time
+char closeTimeStr[8]="NA";                             // Park close Time
 bool systemStatusWriteNeeded = false;               // Keep track of when we need to write
 bool currentCountsWriteNeeded = false;
 bool waitingForConnection = false;
@@ -170,14 +176,14 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("Release",currentPointRelease);
   Particle.variable("stateOfChg", sysStatus.stateOfCharge);
   Particle.variable("lowPowerMode",lowPowerModeStr);
-  Particle.variable("OpenTime",sysStatus.openTime);
-  Particle.variable("CloseTime",sysStatus.closeTime);
+  Particle.variable("OpenTime", openTimeStr);
+  Particle.variable("CloseTime",closeTimeStr);
   Particle.variable("Alerts",current.alertCount);
   Particle.variable("TimeOffset",currentOffsetStr);
   Particle.variable("BatteryContext",batteryContextMessage);
   Particle.variable("SensorStatus",sensorTypeConfigStr);
 
-  Particle.function("resetFRAM", resetFRAM);                          // These are the functions exposed to the mobile app and console
+  Particle.function("setDailyCount", setDailyCount);                          // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
   Particle.function("HardReset",hardResetNow);
   Particle.function("SendNow",sendNow);
@@ -210,6 +216,8 @@ void setup()                                        // Note: Disconnected Setup(
   }
 
   checkSystemValues();                                                // Make sure System values are all in valid range
+
+  makeUpParkHourStrings();                                                    // Create the strings for the console
 
   // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
   System.on(out_of_memory, outOfMemoryHandler);
@@ -310,8 +318,8 @@ void loop()
       fram.put(FRAM::systemStatusAddr,sysStatus);
       Log.warn("failed to connect to cloud, doing deep reset");
       delay(100);
-      ab1805.deepPowerDown();
-      systemStatusWriteNeeded = true;
+      ab1805.deepPowerDown();                                           // Power cycle device and all peripherals - execution goes back to setup()
+      systemStatusWriteNeeded = true;                                   // leaving for now but this line and next two are never reached
       resetTimeStamp = millis();
       state = ERROR_STATE;
     }
@@ -688,6 +696,7 @@ void loadSystemDefaults() {                                         // Default s
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
   sysStatus.closeTime = 21;
+  sysStatus.lastConnectionDuration = 0;                             // New measure
   fram.put(FRAM::systemStatusAddr,sysStatus);                       // Write it now since this is a big deal and I don't want values over written
 }
 
@@ -701,6 +710,7 @@ void checkSystemValues() {                                          // Checks to
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
+  if (sysStatus.lastConnectionDuration < 0 || sysStatus.lastConnectionDuration > connectionTimeout) sysStatus.lastConnectionDuration = 0;
   // None for lastHookResponse
   systemStatusWriteNeeded = true;
 }
@@ -709,6 +719,24 @@ void checkSystemValues() {                                          // Checks to
  // They are intended to allow for customization and control during installations
  // and to allow for management.
 
+ /**
+  * @brief Simple Function to construct a string for the Open and Close Time
+  * 
+  * @details Looks at the open and close time and makes them into time strings.  Also looks at the special case of open 24 hours
+  * and puts in an "NA" for both strings when this is the case.
+  * 
+  */
+void makeUpParkHourStrings() {
+  if (sysStatus.openTime == 0 && sysStatus.closeTime == 24) {
+    snprintf(openTimeStr, sizeof(openTimeStr), "NA");
+    snprintf(closeTimeStr, sizeof(closeTimeStr), "NA");
+    return;
+  }
+    
+  snprintf(openTimeStr, sizeof(openTimeStr), "%i:00", sysStatus.openTime);
+  snprintf(closeTimeStr, sizeof(closeTimeStr), "%i:00", sysStatus.closeTime);
+  return;
+}
 
 /**
  * @brief Connects to Particle or take steps to recover.
@@ -721,20 +749,19 @@ void checkSystemValues() {                                          // Checks to
  * @return 1 if successful, 0 if uncessful or resets device if it has been over two hours
  */
 bool connectToParticleBlocking() {
-  unsigned int maxConnectionSeconds = 11 * 60;                             // Should not be less than 10 minutes
   unsigned long connectionStartTime = Time.now();                 // Start the clock
   char connectionStr[32];
 
   Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
   Particle.connect();
 
-  for (unsigned int retry = 0; retry < maxConnectionSeconds && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
+  for (unsigned int retry = 0; retry < connectionTimeout && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
     if(sensorDetect) recordCount();                               // service the interrupt every second
     Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
 
-  if (Particle.connected()) {
+  if (Particle.connected()) {                                     // We were able to connect within the alotted time. record the event and publish
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
     sysStatus.lastConnectionDuration = Time.now()-connectionStartTime;
@@ -744,17 +771,16 @@ bool connectToParticleBlocking() {
     systemStatusWriteNeeded = true;
     return 1;                                                     // Were able to connect successfully
   }
-  else {
+  else {                                                          // We did not connect in time.  Record the event and to an "enable" pin reset of the device (modem too)
     sysStatus.connectedStatus = false;
     Log.info("cloud connection unsuccessful");
-    if (Time.now() - sysStatus.lastConnection > maxConnectionSeconds) {
+    if (Time.now() - sysStatus.lastConnection > connectionTimeout) {
         fram.put(FRAM::systemStatusAddr,sysStatus);
         Log.info("failed to connect to cloud, doing deep reset");
         delay(100);
-        ab1805.deepPowerDown();
+        ab1805.deepPowerDown();                                   // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
     }
-    systemStatusWriteNeeded = true;
-    return 0;                                                     // Failed to connect
+    return 0;                                                     // Failed to connect will never get to this line
   }
 }
 
@@ -771,16 +797,6 @@ bool disconnectFromParticle()                                     // Ensures we 
 
 bool notConnected() {                                             // Companion function for disconnectFromParticle
   return !Particle.connected();
-}
-
-int resetFRAM(String command)                                     // Will reset the local counts
-{
-  if (command == "1")
-  {
-    fram.erase();
-    return 1;
-  }
-  else return 0;
 }
 
 int resetCounts(String command)                                       // Resets the current hourly and daily counts
@@ -858,7 +874,17 @@ int setSolarMode(String command) // Function to force sending data in current ho
   else return 0;
 }
 
-int setSensorType(String command) // Function to force sending data in current hour
+/**
+ * @brief Set the Sensor Type object
+ * 
+ * @details Over time, we may want to develop and deploy other sensot types.  The idea of this code is to allow us to select the sensor
+ * we want via the console so all devices can run the same code.
+ * 
+ * @param command a string equal to "0" for pressure sensor and "1" for PIR sensor.  More sensor types possible in the future.
+ * 
+ * @return returns 1 if successful and 0 if not.
+ */
+int setSensorType(String command)                                     // Function to force sending data in current hour
 {
   if (command == "0")
   {
@@ -941,6 +967,7 @@ int setOpenTime(String command)
   int tempTime = strtol(command,&pEND,10);                                    // Looks for the first integer and interprets it
   if ((tempTime < 0) || (tempTime > 23)) return 0;                            // Make sure it falls in a valid range or send a "fail" result
   sysStatus.openTime = tempTime;
+  makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                                            // Need to store to FRAM back in the main loop
   if (Particle.connected()) {
     snprintf(data, sizeof(data), "Open time set to %i",sysStatus.openTime);
@@ -967,9 +994,38 @@ int setCloseTime(String command)
   int tempTime = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
   if ((tempTime < 0) || (tempTime > 24)) return 0;   // Make sure it falls in a valid range or send a "fail" result
   sysStatus.closeTime = tempTime;
+  makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",sysStatus.closeTime);
   if (Particle.connected()) publishQueue.publish("Time",data, PRIVATE);
+  return 1;
+}
+
+/**
+ * @brief Sets the daily count for the park - useful when you are replacing sensors.
+ * 
+ * @details Since the hourly counts are not retained after posting to Ubidots, seeding a value for
+ * the daily counts will enable us to follow this process to replace an old counter: 1) Execute the "send now"
+ * command on the old sensor.  Note the daily count.  2) Install the new sensor and perform tests to ensure
+ * it is counting correclty.  3) Use this function to set the daily count to the right value and put the 
+ * new device into operation.
+ *
+ * @param command A string for the new daily count.  
+ * Inputs outside of "0" - "1000" will cause the function to return 0 to indicate an invalid entry.
+ * 
+ * @return 1 if able to successfully take action, 0 if invalid command
+ */
+int setDailyCount(String command)
+{
+  char * pEND;
+  char data[256];
+  int tempCount = strtol(command,&pEND,10);                       // Looks for the first integer and interprets it
+  if ((tempCount < 0) || (tempCount > 1000)) return 0;   // Make sure it falls in a valid range or send a "fail" result
+  current.dailyCount = tempCount;
+  current.lastCountTime = Time.now();
+  currentCountsWriteNeeded = true;                          // Store the new value in FRAMwrite8
+  snprintf(data, sizeof(data), "Daily count set to %i",current.dailyCount);
+  if (Particle.connected()) publishQueue.publish("Daily",data, PRIVATE);
   return 1;
 }
 
