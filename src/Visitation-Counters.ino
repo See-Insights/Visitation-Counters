@@ -28,7 +28,7 @@
 //v10.02 - Updated the Google Strings to make them more clear.  Changed to Google Sheets only on opening hour and when using "Send Now" function
 //v10.03 - Fixed two minor issues - Reporting at Opening hour and "Low Power" labeling
 //v10.04 - Need to put a bounds check on the connect time
-//v11.00  - Fixed major bug that caused repeated publishes to Google sheets
+//v11.00  - Fixed major bug that caused repeated publishes to Google sheets - Verion to be deployed to all devices
 
 
 
