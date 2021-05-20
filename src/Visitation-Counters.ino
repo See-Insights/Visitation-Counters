@@ -29,15 +29,20 @@
 //v10.03 - Fixed two minor issues - Reporting at Opening hour and "Low Power" labeling
 //v10.04 - Need to put a bounds check on the connect time
 //v11.00  - Fixed major bug that caused repeated publishes to Google sheets - Verion to be deployed to all devices
+//v11.01 - Working out some issues with state of charge after sleep - https://community.particle.io/t/soc-returns-0-00-at-times-bsom-eval-board/60000/3
+//v11.02 - Fixed bug that let device get stuck in green flashing light mode
+//v11.03 - Working on way to capture connection error
+//v11.04 - Adding logic to reset the PMIC if needed adding a check to make sure temp measurement is more accurate
+//v11.05 - Added step to ensure graceful shutdown of celular modem
+
 
 
 
 // Particle Product definitions
-// PRODUCT_ID(12529);                               // Boron Connected Counter Header
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(11);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="11.00";
+char currentPointRelease[6] ="11.05";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -83,7 +88,7 @@ struct systemStatus_structure sysStatus;
 // This is the maximum amount of time to allow for connecting to cloud. If this time is
 // exceeded, do a deep power down. This should not be less than 10 minutes. 11 minutes
 // is a reasonable value to use.
-const std::chrono::milliseconds connectMaxTime = 11min;
+unsigned long connectMaxTimeSec = 11 * 60;   // Timeout for trying to connect to Particle cloud in seconds
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
@@ -94,6 +99,7 @@ MB85RC64 fram(Wire, 0);                             // Rickkas' FRAM library
 retained uint8_t publishQueueRetainedBuffer[2048];
 PublishQueueAsync publishQueue(publishQueueRetainedBuffer, sizeof(publishQueueRetainedBuffer));
 AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog library
+FuelGauge fuel;                                     // Enable the fuel gauge API                        
 
 // State Maching Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, REPORTING_STATE, RESP_WAIT_STATE};
@@ -128,7 +134,7 @@ char currentOffsetStr[10];                          // What is our offset from U
 unsigned long lastReportedTime = 0;                 // Need to keep this separate from time so we know when to report
 char sensorTypeConfigStr[16];
 unsigned long connectionStartTime;
-unsigned long connectionTimeout = 11 * 60 * 1000;   // Timeout for trying to connect to Particle cloud in milliseconds
+
 
 // Program Variables
 volatile bool watchdogFlag;                         // Flag to let us know we need to pet the dog
@@ -324,6 +330,8 @@ void loop()
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep device reboots from here   
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
+    fuel.wakeup();                                                     // Make sure that the fuel gauge wakes quickly 
+    fuel.quickStart();
     if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
       setLowPowerMode("0");
       sysStatus.openTime = 0;
@@ -350,6 +358,8 @@ void loop()
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
+    fuel.wakeup();                                                     // Make sure that the fuel gauge wakes quickly 
+    fuel.quickStart();
     if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
       stayAwakeTimeStamp = millis();
     }
@@ -403,6 +413,12 @@ void loop()
   case ERROR_STATE:                                                   // To be enhanced - where we deal with errors
     if (state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait) {
+      if ((Time.now() - sysStatus.lastConnection) > 7200) {         // It is been over two hours since we last connected to the cloud - time for a reset
+        fram.put(FRAM::systemStatusAddr,sysStatus);
+        Log.info("failed to connect to cloud, doing deep reset");
+        delay(100);
+        ab1805.deepPowerDown();                                       // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+      }
       if (sysStatus.resetCount <= 3) {                                // First try simple reset
         if (Particle.connected()) publishQueue.publish("State","Error State - Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
         delay(2000);
@@ -570,8 +586,12 @@ void takeMeasurements()
   getTemperature();                                                   // Get Temperature at startup as well
   
   // Battery Releated actions
+  sysStatus.batteryState = System.batteryState();                     // Call before isItSafeToCharge() as it may overwrite the context
   if (!isItSafeToCharge()) current.alertCount++;                      // Increment the alert count
   sysStatus.stateOfCharge = int(System.batteryCharge());              // Percentage of full charge
+  if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
+    System.setPowerConfiguration(SystemPowerConfiguration());         // Reset the PMIC
+  }
   if (sysStatus.stateOfCharge < current.minBatteryLevel) current.minBatteryLevel = sysStatus.stateOfCharge; // Keep track of lowest value for the day
   if (sysStatus.stateOfCharge < 30) sysStatus.lowBatteryMode = true;  // Check to see if we are in low battery territory
   else sysStatus.lowBatteryMode = false;                              // We have sufficient to continue operations
@@ -581,9 +601,8 @@ void takeMeasurements()
 }
 
 bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.  
-{     
-  sysStatus.batteryState = System.batteryState();
-  PMIC pmic(true);                                                                
+{         
+  PMIC pmic(true);                                 
   if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
     pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
     sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
@@ -611,9 +630,13 @@ void getSignalStrength() {
   snprintf(SignalString,sizeof(SignalString), "%s S:%2.0f%%, Q:%2.0f%% ", radioTech[rat], strengthPercentage, qualityPercentage);
 }
 
-int getTemperature()
-{
+int getTemperature() {                                                // Get temperature and make sure we are not getting a spurrious value
+
   int reading = analogRead(tmp36Pin);                                 //getting the voltage reading from the temperature sensor
+  if (reading < 400) {                                                // This ocrresponds to 0 degrees - less than this and we should take another reading to be sure
+    delay(50);
+    reading = analogRead(tmp36Pin);
+  }
   float voltage = reading * 3.3;                                      // converting that reading to voltage, for 3.3v arduino use 3.3
   voltage /= 4096.0;                                                  // Electron is different than the Arduino where there are only 1024 steps
   int temperatureC = int(((voltage - 0.5) * 100));                    //converting from 10 mv per degree with 500 mV offset to degrees ((voltage - 500mV) times 100) - 5 degree calibration
@@ -708,10 +731,10 @@ void checkSystemValues() {                                          // Checks to
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
-  if (sysStatus.lastConnectionDuration < 0 || sysStatus.lastConnectionDuration > connectionTimeout/1000) sysStatus.lastConnectionDuration = 0;
+  if (sysStatus.lastConnectionDuration < 0 || sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = 0;
   sysStatus.solarPowerMode = true;                                  // Need to reset this value across the fleet
 
-  if (current.maxConnectTime > connectionTimeout/1000) {
+  if (current.maxConnectTime > connectMaxTimeSec) {
     current.maxConnectTime = 0;
     currentCountsWriteNeeded = true;
   }
@@ -759,7 +782,7 @@ bool connectToParticleBlocking() {
   Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
   Particle.connect();
 
-  for (unsigned int retry = 0; retry < connectionTimeout && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
+  for (unsigned int retry = 0; retry < connectMaxTimeSec && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
     if(sensorDetect) recordCount();                               // service the interrupt every second
     Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
@@ -769,7 +792,7 @@ bool connectToParticleBlocking() {
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
     sysStatus.lastConnectionDuration = Time.now() - connectionStartTime;
-    if (sysStatus.lastConnectionDuration > connectionTimeout/1000) sysStatus.lastConnectionDuration = 0;  // This is clearly an erroneous result
+    if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = 0;  // This is clearly an erroneous result
 
     if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
     
@@ -783,32 +806,27 @@ bool connectToParticleBlocking() {
   else {                                                          // We did not connect in time.  Record the event and to an "enable" pin reset of the device (modem too)
     sysStatus.connectedStatus = false;
     Log.info("cloud connection unsuccessful");
-    if ((Time.now() - sysStatus.lastConnection) > 7200) {         // It is been over two hours since we last connected to the cloud - time for a reset
-        fram.put(FRAM::systemStatusAddr,sysStatus);
-        Log.info("failed to connect to cloud, doing deep reset");
-        delay(100);
-        ab1805.deepPowerDown();                                   // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
-    }
+    resetTimeStamp = millis();
+    state = ERROR_STATE;
+    systemStatusWriteNeeded = true;
     return 0;                                                     // Failed to connect will never get to this line
   }
 }
 
 bool disconnectFromParticle()                                     // Ensures we disconnect cleanly from Particle
+                                                                  // Updated based onthis thread: https://community.particle.io/t/waitfor-particle-connected-timeout-does-not-time-out/59181
 {
   Particle.disconnect();
-  waitFor(notConnected, 15000);                                   // make sure before turning off the cellular modem
-  Cellular.off();
+  waitForNot(Particle.connected, 15000);                          // make sure before turning off the cellular modem
+  Cellular.disconnect();                                          // Disconnect from the cellular network
+  Cellular.off();                                                 // Turn off the cellular modem
+  waitFor(Cellular.isOff, 30000);                                 // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
   sysStatus.connectedStatus = false;
   systemStatusWriteNeeded = true;
-  delay(2000);                                                    // Bummer but only should happen once an hour
   return true;
 }
 
-bool notConnected() {                                             // Companion function for disconnectFromParticle
-  return !Particle.connected();
-}
-
-int resetCounts(String command)                                       // Resets the current hourly and daily counts
+int resetCounts(String command)                                   // Resets the current hourly and daily counts
 {
   if (command == "1")
   {
