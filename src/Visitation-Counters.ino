@@ -34,6 +34,7 @@
 //v11.03 - Working on way to capture connection error
 //v11.04 - Adding logic to reset the PMIC if needed adding a check to make sure temp measurement is more accurate
 //v11.05 - Added step to ensure graceful shutdown of celular modem
+//v11.06 - Got rif of the last Serial statement and added the Serial Log Handler for montitoring
 
 
 
@@ -79,7 +80,7 @@ std::atomic<uint32_t> dailyAtomic;
 #include "PublishQueueAsyncRK.h"                    // Async Particle Publish
 #include <atomic>
 
-// Libraries with helper functions
+// Libraries with helper functionsB40TAB9228FTJVL LXUML5Y3EE3YW4X
 #include "time_zone_fn.h"
 #include "sys_status.h"
 
@@ -99,7 +100,10 @@ MB85RC64 fram(Wire, 0);                             // Rickkas' FRAM library
 retained uint8_t publishQueueRetainedBuffer[2048];
 PublishQueueAsync publishQueue(publishQueueRetainedBuffer, sizeof(publishQueueRetainedBuffer));
 AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog library
-FuelGauge fuel;                                     // Enable the fuel gauge API                        
+FuelGauge fuel;                                     // Enable the fuel gauge API     
+
+// For monitoring / debugging, you can uncomment the next line
+SerialLogHandler logHandler(LOG_LEVEL_ALL);
 
 // State Maching Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, REPORTING_STATE, RESP_WAIT_STATE};
@@ -1099,7 +1103,7 @@ int setLowPowerMode(String command)                                   // This is
 }
 
 /**
- * @brief Publishes a state transition over serial and to the Particle monitoring system.
+ * @brief Publishes a state transition to the Log Handler and to the Particle monitoring system.
  * 
  * @details A good debugging tool.
  */
@@ -1110,7 +1114,7 @@ void publishStateTransition(void)
   oldState = state;
   if (sysStatus.verboseMode) {
     if(Particle.connected()) publishQueue.publish("State Transition",stateTransitionString, PRIVATE, WITH_ACK);
-    Serial.println(stateTransitionString);
+    Log.info(stateTransitionString);
   }
 }
 
