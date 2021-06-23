@@ -35,15 +35,17 @@
 //v11.04 - Adding logic to reset the PMIC if needed adding a check to make sure temp measurement is more accurate
 //v11.05 - Added step to ensure graceful shutdown of celular modem
 //v11.06 - Got rif of the last Serial statement and added the Serial Log Handler for montitoring
-
-
+//  Particle has identified an issue where certain devices are going into a cycle of power being disconnected just after the device connects.  This is causing excessive data consumption.  Need to focus on all parts of code where power can be bounced.
+//v12.00 - Based on conversation with Particle support - changed full modem reset function, update to deviceOS@2.1.0 - and will do two test legs (low risk / power cycle to reset , high risk / disable WDT) will see if this fixes issues - v12 will be the power cycle to system reset version
+//v13.00 - In this version, we will disable the Watchdog timer in Setup.
+//v14.00 - In this version, we will update v12 with a longer timeout in the connection process to 5 seconds.  This is needed due to recent changes in the Particle backend systems.
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(11);
+PRODUCT_VERSION(14);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="11.05";
+char currentPointRelease[6] ="14.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -247,8 +249,7 @@ void setup()                                        // Note: Disconnected Setup(
   // Note whether the RTC is set 
   sysStatus.clockSet = ab1805.isRTCSet();
 
-  // Enable watchdog
-  ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);
+  ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                         // Enable watchdog
 
   Time.setDSTOffset(sysStatus.dstOffset);                              // Set the value from FRAM if in limits
 
@@ -361,8 +362,8 @@ void loop()
       .gpio(intPin,RISING)
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
-    ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
-    fuel.wakeup();                                                     // Make sure that the fuel gauge wakes quickly 
+      ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
+      fuel.wakeup();                                                     // Make sure that the fuel gauge wakes quickly 
     fuel.quickStart();
     if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
       stayAwakeTimeStamp = millis();
@@ -421,7 +422,8 @@ void loop()
         fram.put(FRAM::systemStatusAddr,sysStatus);
         Log.info("failed to connect to cloud, doing deep reset");
         delay(100);
-        ab1805.deepPowerDown();                                       // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+        //ab1805.deepPowerDown();                                     // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+        System.reset();                                               // This is a test to see if we can fix the excessive power usage 
       }
       if (sysStatus.resetCount <= 3) {                                // First try simple reset
         if (Particle.connected()) publishQueue.publish("State","Error State - Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
@@ -433,7 +435,8 @@ void loop()
         delay(2000);
         sysStatus.resetCount = 0;                                     // Zero the ResetCount
         systemStatusWriteNeeded=true;
-        ab1805.deepPowerDown(10);
+        //ab1805.deepPowerDown();                                     // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+        System.reset();                                               // This is a test to see if we can fix the excessive power usage 
       }
       else {                                                          // If we have had 3 resets - time to do something more
         if (Particle.connected()) publishQueue.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);            // Brodcase Reset Action
@@ -786,7 +789,7 @@ bool connectToParticleBlocking() {
   Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
   Particle.connect();
 
-  for (unsigned int retry = 0; retry < connectMaxTimeSec && !waitFor(Particle.connected,1000); retry++) {   // wait a second and repeat
+  for (unsigned int retry = 0; retry < connectMaxTimeSec && !waitFor(Particle.connected,5000); retry = retry + 5) {   // wait 5 seconds and repeat
     if(sensorDetect) recordCount();                               // service the interrupt every second
     Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
@@ -852,6 +855,7 @@ int hardResetNow(String command)                                      // Will pe
   if (command == "1")
   {
     publishQueue.publish("Reset","Hard Reset in 2 seconds",PRIVATE);
+    delay(2000);
     ab1805.deepPowerDown(10);
     return 1;                                                         // Unfortunately, this will never be sent
   }
@@ -1132,7 +1136,8 @@ void fullModemReset() {  //
 	}
 	// Reset the modem and SIM card
 	// 16:MT silent reset (with detach from network and saving of NVM parameters), with reset of the SIM card
-	Cellular.command(30000, "AT+CFUN=15\r\n");
+  Cellular.off();
+	// Cellular.command(30000, "AT+CFUN=15\r\n");
 	delay(1000);
 	// Go into deep sleep for 10 seconds to try to reset everything. This turns off the modem as well.
 	System.sleep(SLEEP_MODE_DEEP, 10);
