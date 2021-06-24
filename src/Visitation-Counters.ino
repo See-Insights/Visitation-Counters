@@ -42,13 +42,14 @@
 //v14.01 - Trying a longer timout as 5 seconds does not seem to be long enough
 //v14.02 - Going to add another step to catch this issue potentially also going to take the penalty out of not connecting.
 //v15.00 - Major changes - working to stop or slow down the reset loop.
+//v16.00 - Moving the Particle connection function to the main loop to eliminate blocking issue.  Removed line from ResponseWait that was causing repeated session restarts
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(15);
+PRODUCT_VERSION(16);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="15.00";
+char currentPointRelease[6] ="16.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -111,8 +112,8 @@ FuelGauge fuel;                                     // Enable the fuel gauge API
 SerialLogHandler logHandler(LOG_LEVEL_ALL);
 
 // State Maching Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, REPORTING_STATE, RESP_WAIT_STATE};
-char stateNames[8][14] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Reporting", "Response Wait"};
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE};
+char stateNames[8][14] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Connecting", "Reporting", "Response Wait"};
 State state = INITIALIZATION_STATE;
 State oldState = INITIALIZATION_STATE;
 
@@ -155,7 +156,7 @@ char openTimeStr[8]="NA";                           // Park Open Time
 char closeTimeStr[8]="NA";                          // Park close Time
 bool systemStatusWriteNeeded = false;               // Keep track of when we need to write
 bool currentCountsWriteNeeded = false;
-bool waitingForConnection = false;
+bool particleConnectionNeeded = false;              // This is how we signal a need to connect to Particle
 
 // These variables are associated with the watchdog timer and will need to be better integrated
 int outOfMemory = -1;
@@ -207,7 +208,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("BatteryContext",batteryContextMessage);
   Particle.variable("SensorStatus",sensorTypeConfigStr);
 
-  Particle.function("setDailyCount", setDailyCount);                          // These are the functions exposed to the mobile app and console
+  Particle.function("setDailyCount", setDailyCount);                  // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
   Particle.function("HardReset",hardResetNow);
   Particle.function("SendNow",sendNow);
@@ -241,52 +242,40 @@ void setup()                                        // Note: Disconnected Setup(
 
   checkSystemValues();                                                // Make sure System values are all in valid range
 
-  makeUpParkHourStrings();                                            // Create the strings for the console
-
   // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
   System.on(out_of_memory, outOfMemoryHandler);
 
-  // The carrier board has D8 connected to FOUT for wake interrupts
-  ab1805.withFOUT(D8).setup();
+  // Here is where we setup the Watchdog timer and Real Time Clock
+  ab1805.withFOUT(D8).setup();                                        // The carrier board has D8 connected to FOUT for wake interrupts
+  sysStatus.clockSet = ab1805.isRTCSet();                             // Note whether the RTC is set 
+  ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                        // Enable watchdog
 
-  // Note whether the RTC is set 
-  sysStatus.clockSet = ab1805.isRTCSet();
-
-  ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                         // Enable watchdog
-
-  Time.setDSTOffset(sysStatus.dstOffset);                              // Set the value from FRAM if in limits
-
-  if (!Time.isValid() && sysStatus.clockSet) {                         // We need to try to get the time so we can tell if we need DST
-    ab1805.getRtcAsTime(RTCTime);                                      // Get the time from the RTC if it is set
-    Time.setTime(RTCTime);
-  }
-  else {                                                               // Special case, neither the RTC or the system clock is set, we need to connect and get the time
-    if (connectToParticleBlocking()) Particle.syncTime();              // Set the system clock here if connection successful
-  }
-
-  DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
-  Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
+  // Next we set the timezone and check is we are in daylight savings time
+  Time.setDSTOffset(sysStatus.dstOffset);                             // Set the value from FRAM if in limits
+  DSTRULES() ? Time.beginDST() : Time.endDST();                       // Perform the DST calculation here
+  Time.zone(sysStatus.timezone);                                      // Set the Time Zone for our device
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
+  sensorControl(true);                                                // Turn on the sensor
+
+  // Make up the strings to make console values easier to read
+  makeUpParkHourStrings();                                            // Create the strings for the console
   (sysStatus.lowPowerMode) ? strncpy(lowPowerModeStr,"Low Power",sizeof(lowPowerModeStr)) : strncpy(lowPowerModeStr,"Not Low Power",sizeof(lowPowerModeStr));
-
-  sensorControl(true);                                                // Turn on the sensors.
-
   if (sysStatus.sensorType == 0) strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
   else if (sysStatus.sensorType == 1) strncpy(sensorTypeConfigStr,"PIR Sensor",sizeof(sensorTypeConfigStr));
 
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
-    systemStatusWriteNeeded = true;                                    // If so, store incremented number - watchdog must have done This
+    systemStatusWriteNeeded = true;                                   // If so, store incremented number - watchdog must have done This
   }
 
   // Done with the System Stuff - now we will focus on the current counts values
   if (current.hourlyCount) lastReportedTime = current.lastCountTime;
-  else lastReportedTime = Time.now();                                  // Initialize it to now so that reporting can begin as soon as the hour changes
+  else lastReportedTime = Time.now();                                 // Initialize it to now so that reporting can begin as soon as the hour changes
 
-  setPowerConfig();                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
+  setPowerConfig();                                                   // Executes commands that set up the Power configuration between Solar and DC-Powered
 
-  if (!digitalRead(userSwitch)) loadSystemDefaults();                  // Make sure the device wakes up and connects
+  if (!digitalRead(userSwitch)) loadSystemDefaults();                 // Make sure the device wakes up and connects
 
   // Here is where the code diverges based on why we are running Setup()
   // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over  
@@ -297,7 +286,7 @@ void setup()                                        // Note: Disconnected Setup(
   if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) { // Park is open let's get ready for the day                                                            
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) {         // If the system thinks we are connected, let's make sure that we are
-      if (!connectToParticleBlocking()) sysStatus.connectedStatus = false;  // This may happen if there was an unexpected reset during park open hours - If connection fails - reset flag
+      particleConnectionNeeded = true;                                // Raise this flag and we will connect once we enter the main loop
     }
     takeMeasurements();                                               // Populates values so you can read them before the hour
     stayAwake = stayAwakeLong;                                        // Keeps Boron awake after reboot - helps with recovery
@@ -317,8 +306,7 @@ void loop()
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;         // When in low power mode, we can nap between taps
     if (Time.hour() != Time.hour(lastReportedTime)) state = REPORTING_STATE;                                  // We want to report on the hour but not after bedtime
     if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
-
-    
+    if (particleConnectionNeeded) state = CONNECTING_STATE;                                                   // Someone raised the connection neeeded flag - will return to IDLE once attempt is completed
     break;
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
@@ -347,6 +335,7 @@ void loop()
     if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
       sensorControl(true);                                             // Turn off the sensor module for the hour
       attachInterrupt(intPin, sensorISR, RISING);                      // Pressure Sensor interrupt from low to high
+      takeMeasurements();                                              // Take measureements here before we turn on the cellular radio
       stayAwake = stayAwakeLong;                                       // Keeps Boron awake after deep sleep - may not be needed
     }
     state = IDLE_STATE;                                                // Head back to the idle state to see what to do next
@@ -364,48 +353,89 @@ void loop()
       .gpio(intPin,RISING)
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
-      ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
-      fuel.wakeup();                                                     // Make sure that the fuel gauge wakes quickly 
+      ab1805.resumeWDT();                                              // Wakey Wakey - WDT can resume
+      fuel.wakeup();                                                   // Make sure that the fuel gauge wakes quickly 
     fuel.quickStart();
     if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
       stayAwakeTimeStamp = millis();
     }
     else if (result.wakeupPin() == userSwitch) setLowPowerMode("0");
-    state = IDLE_STATE;                                               // Back to the IDLE_STATE after a nap - not enabling updates here as napping is typicallly disconnected
+    else takeMeasurements();                                           // If not the sensor or the user switch, it must be the top of the hour - take measureements here before we turn on the cellular radio
+    state = IDLE_STATE;                                                // Back to the IDLE_STATE after a nap - not enabling updates here as napping is typicallly disconnected
     } break;
 
-  case REPORTING_STATE:
-    if (state != oldState) publishStateTransition();
-    if (!sysStatus.connectedStatus) {
-      if (!connectToParticleBlocking()) {                             // Go to connect state to connect and will return from there
-        if ((Time.now() - sysStatus.lastHookResponse) > 7200) {        // Only go to the ERROR stat if it has been over two hours
-          state = ERROR_STATE;
-          resetTimeStamp = millis();
-          break;
-        }
-      }                                    
+  case CONNECTING_STATE:{
+    static unsigned long connectionStartTime;
+    char connectionStr[32];
+    static bool returnToReporting;
+
+    if (state != oldState) {
+      if (oldState == REPORTING_STATE) returnToReporting = true;
+      else returnToReporting = false;                                 // Need to set value each time - just to be clear
+      publishStateTransition();
+      connectionStartTime = Time.now();                 // Start the clock first time we enter the state
+      Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
+      Particle.connect();                                             // Told the Particle to connect, now we need to wait
     }
 
     if (Particle.connected()) {
-      takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
+      particleConnectionNeeded = false;                               // Connected so we don't need this flag
+      sysStatus.connectedStatus = true;
+      sysStatus.lastConnection = Time.now();                          // This is the last time we attempted to connect
+    }
+    else if ((Time.now() - connectionStartTime) > connectMaxTimeSec) {
+      particleConnectionNeeded = false;                               // Timed out so we will give up until the next hour
+      if ((Time.now() - sysStatus.lastConnection) > 7200) {             // Only sends to ERROR_STATE if it has been over 2 hours
+        state = ERROR_STATE;     
+        resetTimeStamp = millis();
+      }
+      sysStatus.connectedStatus = false;
+      Log.info("cloud connection unsuccessful");
+    } 
+
+    if (!particleConnectionNeeded) {                                  // Whether the connection was successful or not, we will collect and publish metrics
+      sysStatus.lastConnectionDuration = Time.now() - connectionStartTime;
+      if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = connectMaxTimeSec;           // This is clearly an erroneous result
+      if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
+      snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
+      Log.info(connectionStr);
+      if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
+      systemStatusWriteNeeded = true;
+      currentCountsWriteNeeded = true;
+      if (sysStatus.connectedStatus && returnToReporting) state = REPORTING_STATE;    // If we came here from reporting, this will send us back
+      else state = IDLE_STATE;                                             // We are connected so, we can go to the IDLE state
+    }
+  }
+
+  case REPORTING_STATE:
+    if (state != oldState) publishStateTransition();
+
+    if (!sysStatus.connectedStatus) {                                 // Asking us to report but not connected
+      particleConnectionNeeded = true;                                // Set the flag to connect us to Particle
+      lastReportedTime = Time.now();                                  // We are only going to try once
+      state = CONNECTING_STATE;                                       // Will send us to connecting state - and it will send us back here                                             
+      break;
+    }
+
+    if (!sysStatus.lowPowerMode) takeMeasurements();                  // Do this here as device not in lowPowerMode will not meausre coming out of sleep / napping
+
+    if (sysStatus.connectedStatus) {
       if (Time.hour() == sysStatus.openTime) dailyCleanup();          // Once a day, clean house and publish to Google Sheets
       else sendEvent();                                               // Send data to Ubidots but not at opening time as there is nothing to publish
-  
       if (Time.hour() == sysStatus.openTime && sysStatus.openTime==0) sendEvent();    // Need this so we can get 24 hour reporting for non-sleeping devices
-      webhookTimeStamp = millis();
-      lastReportedTime = Time.now();
+      webhookTimeStamp = millis();                                    // This is for a webHook response timeout
       state = RESP_WAIT_STATE;                                        // Wait for Response
     }
     else {                                                            // In this case, the connection failed.  We will therefore skip this reporting period and go back to IDLE - try again next hour
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
-      lastReportedTime = Time.now();                                  // Even if we fail so it will delay retry until next hour
       state = IDLE_STATE;
     }
     break;
 
   case RESP_WAIT_STATE:
     if (state != oldState) publishStateTransition();
+
     if (!dataInFlight)  {                                             // Response received --> back to IDLE state
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
@@ -419,7 +449,6 @@ void loop()
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
-      publishQueue.publish("spark/device/session/end", "", PRIVATE, WITH_ACK);  // If the device times out on the Webhook response, it will ensure a new session is started on next connect
       state = ERROR_STATE;                                            // Response timed out
     }
     break;
@@ -434,30 +463,28 @@ void loop()
         fram.put(FRAM::systemStatusAddr,sysStatus);
         Log.error("failed to connect to cloud, doing deep reset");
         delay(100);
-        //ab1805.deepPowerDown();                                     // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
         fullModemReset();                                             // Full Modem reset and reboot
       }
-      else if (Time.now() - sysStatus.lastHookResponse > 7200L) { //It has been more than two hours since a sucessful hook response
-        if (Particle.connected()) publishQueue.publish("State","Error State - Power Cycle", PRIVATE, WITH_ACK);  // Broadcast Reset Action
+      else if (Time.now() - sysStatus.lastHookResponse > 7200L) {     //It has been more than two hours since a sucessful hook response
+        if (sysStatus.connectedStatus) publishQueue.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);  // Broadcast Reset Action
         delay(2000);                                                  // Time to publish
         sysStatus.resetCount = 0;                                     // Zero the ResetCount
         sysStatus.lastHookResponse = Time.now() - 3600;               // Give it an hour before we act on this condition again
         systemStatusWriteNeeded=true;
-        //ab1805.deepPowerDown();                                     // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
         fullModemReset();                                             // Full Modem reset and reboot
       }
       // The next two are more general so a simple reset is all you need
       else if (sysStatus.resetCount <= 3) {                                // First try simple reset
-        if (Particle.connected()) publishQueue.publish("State","Error State - Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
+        if (sysStatus.connectedStatus) publishQueue.publish("State","Error State - System Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
         delay(2000);
         System.reset();
       }
       else {                                                          // If we have had 3 resets - time to do something more
-        if (Particle.connected()) publishQueue.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);            // Brodcase Reset Action
+        if (sysStatus.connectedStatus) publishQueue.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);            // Brodcase Reset Action
         delay(2000);
         sysStatus.resetCount = 0;                                     // Zero the ResetCount
-        systemStatusWriteNeeded=true;
-        fullModemReset();                                             // Full Modem reset and reboots
+        fram.put(FRAM::systemStatusAddr,sysStatus);                   // Won't get back to the main loop
+        ab1805.deepPowerDown();                                       // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
       }
     }
     break;
@@ -533,7 +560,7 @@ void recordCount() // This is where we check to see if an interrupt is set when 
   current.lastCountTime = Time.now();
   current.hourlyCount++;                                              // Increment the PersonCount
   current.dailyCount++;                                               // Increment the PersonCount
-  if (sysStatus.verboseMode && Particle.connected()) {
+  if (sysStatus.verboseMode && sysStatus.connectedStatus) {
     char data[256];                                                   // Store the date in this character array - not global
     snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",current.hourlyCount,current.dailyCount);
     publishQueue.publish("Count",data, PRIVATE, WITH_ACK);                      // Helpful for monitoring and calibration
@@ -608,15 +635,20 @@ void takeMeasurements()
   
   // Battery Releated actions
   sysStatus.batteryState = System.batteryState();                     // Call before isItSafeToCharge() as it may overwrite the context
+
   if (!isItSafeToCharge()) current.alertCount++;                      // Increment the alert count
-  sysStatus.stateOfCharge = int(System.batteryCharge());              // Percentage of full charge
+
+  // This section is a fix for a problem that I hope gets fixed in a future deviceOS update - Inaccurate state of charge when measring after sleep
+  fuel.wakeup();                                                      //wake up the Fuel Gauge chip
+  delay(500);                                                         // https://community.particle.io/t/sleepy-boron-soc-not-updating/55086/37
+  sysStatus.stateOfCharge = int(fuel.getSoC());                       // Assign to system value
+
   if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
     System.setPowerConfiguration(SystemPowerConfiguration());         // Reset the PMIC
   }
   if (sysStatus.stateOfCharge < current.minBatteryLevel) current.minBatteryLevel = sysStatus.stateOfCharge; // Keep track of lowest value for the day
   if (sysStatus.stateOfCharge < 30) sysStatus.lowBatteryMode = true;  // Check to see if we are in low battery territory
   else sysStatus.lowBatteryMode = false;                              // We have sufficient to continue operations
-
   systemStatusWriteNeeded = true;
   currentCountsWriteNeeded = true;
 }
@@ -719,8 +751,8 @@ int setPowerConfig() {
 
 
 void loadSystemDefaults() {                                           // Default settings for the device - connected, not-low power and always on
-  connectToParticleBlocking();                                        // Get connected to Particle - sets sysStatus.connectedStatus to true
-  if (Particle.connected()) publishQueue.publish("Mode","Loading System Defaults", PRIVATE, WITH_ACK);
+  particleConnectionNeeded = true;                                    // Get connected to Particle - sets sysStatus.connectedStatus to true
+  if (sysStatus.connectedStatus) publishQueue.publish("Mode","Loading System Defaults", PRIVATE, WITH_ACK);
   sysStatus.structuresVersion = 1;
   sysStatus.verboseMode = false;
   sysStatus.clockSet = false;
@@ -786,58 +818,6 @@ void makeUpParkHourStrings() {
   return;
 }
 
-/**
- * @brief Connects to Particle or take steps to recover.
- * 
- * @details You can configure the amount of time to fail to connect to the cloud before doing 
- * a deep power off for 30 seconds. The default is 11 minutes, and you should not set it less 
- * than 10. You can set it higher if you want.
- * Code modified from the application watchdog app note: https://github.com/rickkas7/AB1805_RK
- * 
- * @return 1 if successfull, 0 if unsuccessfull
- */
-bool connectToParticleBlocking() {
-  unsigned long connectionStartTime = Time.now();                 // Start the clock
-  char connectionStr[32];
-  const int timeInSecToWaitForConnectedToBeTrue = 10;
-
-  Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
-  Particle.connect();
-
-  for (unsigned int retry = 0; retry < connectMaxTimeSec && !waitFor(Particle.connected,timeInSecToWaitForConnectedToBeTrue*1000); retry+=timeInSecToWaitForConnectedToBeTrue) {   // wait 10 seconds and repeat
-    if(sensorDetect) recordCount();                               // service the interrupt every cycle
-    Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
-    ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
-  }
-
-  // Keep track of how long it took us to connect or max time if not
-  sysStatus.lastConnectionDuration = Time.now() - connectionStartTime;
-  if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = connectMaxTimeSec;           // This is clearly an erroneous result
-  if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
-  snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
-  Log.info(connectionStr);
-  if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
-
-  systemStatusWriteNeeded = true;
-  currentCountsWriteNeeded = true;
-
-  waitFor(Particle.connected, 10000);                             // Another check - are we truly connected? This is stupid, I know!
-
-  if (Particle.connected()) {                                     // We were able to connect within the alotted time. record the event and publish
-    sysStatus.connectedStatus = true;
-    sysStatus.lastConnection = Time.now();
-    return 1;                                                     // Were able to connect successfully
-  }
-  else {                                                          // We did not connect in time.  We will no longer send you automatically to the ERROR_STATE
-    if (Time.now() - sysStatus.lastConnection > 7200) {            // Only sends to ERROR_STATE if it has been over 3 hours
-      state = ERROR_STATE;     
-      resetTimeStamp = millis();
-    }
-    sysStatus.connectedStatus = false;
-    Log.info("cloud connection unsuccessful");
-    return 0;                                                     // Failed to connect will never get to this line
-  }
-}
 
 bool disconnectFromParticle()                                     // Ensures we disconnect cleanly from Particle
                                                                   // Updated based onthis thread: https://community.particle.io/t/waitfor-particle-connected-timeout-does-not-time-out/59181
@@ -919,7 +899,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     sysStatus.solarPowerMode = true;
     setPowerConfig();                                               // Change the power management Settings
     systemStatusWriteNeeded=true;
-    if (Particle.connected()) publishQueue.publish("Mode","Set Solar Powered Mode", PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("Mode","Set Solar Powered Mode", PRIVATE, WITH_ACK);
     return 1;
   }
   else if (command == "0")
@@ -927,7 +907,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
     sysStatus.solarPowerMode = false;
     systemStatusWriteNeeded=true;
     setPowerConfig();                                                // Change the power management settings
-    if (Particle.connected()) publishQueue.publish("Mode","Cleared Solar Powered Mode", PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("Mode","Cleared Solar Powered Mode", PRIVATE, WITH_ACK);
     return 1;
   }
   else return 0;
@@ -950,7 +930,7 @@ int setSensorType(String command)                                     // Functio
     sysStatus.sensorType = 0;
     strncpy(sensorTypeConfigStr,"Pressure Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
-    if (Particle.connected()) publishQueue.publish("Mode","Set Sensor Mode to Pressure", PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("Mode","Set Sensor Mode to Pressure", PRIVATE, WITH_ACK);
     
     return 1;
   }
@@ -959,7 +939,7 @@ int setSensorType(String command)                                     // Functio
     sysStatus.sensorType = 1;
     strncpy(sensorTypeConfigStr,"PIR Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
-    if (Particle.connected()) publishQueue.publish("Mode","Set Sensor Mode to PIR", PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("Mode","Set Sensor Mode to PIR", PRIVATE, WITH_ACK);
     return 1;
   }
 
@@ -984,7 +964,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
   {
     sysStatus.verboseMode = true;
     systemStatusWriteNeeded = true;
-    if (Particle.connected()) publishQueue.publish("Mode","Set Verbose Mode", PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("Mode","Set Verbose Mode", PRIVATE, WITH_ACK);
     sensorControl(true);                                    // Make sure the sensor is on and correctly configured
     return 1;
   }
@@ -992,7 +972,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
   {
     sysStatus.verboseMode = false;
     systemStatusWriteNeeded = true;
-    if (Particle.connected()) publishQueue.publish("Mode","Cleared Verbose Mode", PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("Mode","Cleared Verbose Mode", PRIVATE, WITH_ACK);
     sensorControl(true);                                      // Make sure the sensor is on and correctly configured
     return 1;
   }
@@ -1028,7 +1008,7 @@ int setOpenTime(String command)
   sysStatus.openTime = tempTime;
   makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                                            // Need to store to FRAM back in the main loop
-  if (Particle.connected()) {
+  if (sysStatus.connectedStatus) {
     snprintf(data, sizeof(data), "Open time set to %i",sysStatus.openTime);
     publishQueue.publish("Time",data, PRIVATE, WITH_ACK);
   }
@@ -1056,7 +1036,7 @@ int setCloseTime(String command)
   makeUpParkHourStrings();                                                    // Create the strings for the console
   systemStatusWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",sysStatus.closeTime);
-  if (Particle.connected()) publishQueue.publish("Time",data, PRIVATE, WITH_ACK);
+  if (sysStatus.connectedStatus) publishQueue.publish("Time",data, PRIVATE, WITH_ACK);
   return 1;
 }
 
@@ -1084,7 +1064,7 @@ int setDailyCount(String command)
   current.lastCountTime = Time.now();
   currentCountsWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Daily count set to %i",current.dailyCount);
-  if (Particle.connected()) publishQueue.publish("Daily",data, PRIVATE, WITH_ACK);
+  if (sysStatus.connectedStatus) publishQueue.publish("Daily",data, PRIVATE, WITH_ACK);
   return 1;
 }
 
@@ -1105,7 +1085,7 @@ int setLowPowerMode(String command)                                   // This is
   if (command != "1" && command != "0") return 0;                     // Before we begin, let's make sure we have a valid input
   if (command == "1")                                                 // Command calls for setting lowPowerMode
   {
-    if (Particle.connected()) {
+    if (sysStatus.connectedStatus) {
       publishQueue.publish("Mode","Low Power Mode", PRIVATE, WITH_ACK);
       delay(1000);                                                    // Make sure the message gets out
     }
@@ -1116,9 +1096,9 @@ int setLowPowerMode(String command)                                   // This is
   {
     publishQueue.publish("Mode","Normal Operations", PRIVATE, WITH_ACK);
     sysStatus.lowPowerMode = false;                                   // update the variable used for console status
-    strncpy(lowPowerModeStr,"Not Low Power", sizeof(lowPowerModeStr));        // Use capitalization so we know that we set this.
-    if (!Particle.connected()) {                                      // In case we are not connected, we will do so now.
-      connectToParticleBlocking();                                    // Will connect - if connection fails, will need to reset device
+    strncpy(lowPowerModeStr,"Not Low Power", sizeof(lowPowerModeStr));// Use capitalization so we know that we set this.
+    if (!sysStatus.connectedStatus) {                                 // In case we are not connected, we will do so now.
+      particleConnectionNeeded = true;                                // Will connect - if connection fails, will need to reset device
     }
   }
   systemStatusWriteNeeded = true;
@@ -1136,7 +1116,7 @@ void publishStateTransition(void)
   snprintf(stateTransitionString, sizeof(stateTransitionString), "From %s to %s", stateNames[oldState],stateNames[state]);
   oldState = state;
   if (sysStatus.verboseMode) {
-    if(Particle.connected()) publishQueue.publish("State Transition",stateTransitionString, PRIVATE, WITH_ACK);
+    if (sysStatus.connectedStatus) publishQueue.publish("State Transition",stateTransitionString, PRIVATE, WITH_ACK);
     Log.info(stateTransitionString);
   }
 }
@@ -1150,7 +1130,7 @@ void publishStateTransition(void)
 void fullModemReset() {  // 
 	Particle.disconnect(); 	                                         // Disconnect from the cloud
 	unsigned long startTime = millis();  	                           // Wait up to 15 seconds to disconnect
-	while(Particle.connected() && millis() - startTime < 15000) {
+	while(sysStatus.connectedStatus && millis() - startTime < 15000) {
 		delay(100);
 	}
 	// Reset the modem and SIM card
