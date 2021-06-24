@@ -39,13 +39,16 @@
 //v12.00 - Based on conversation with Particle support - changed full modem reset function, update to deviceOS@2.1.0 - and will do two test legs (low risk / power cycle to reset , high risk / disable WDT) will see if this fixes issues - v12 will be the power cycle to system reset version
 //v13.00 - In this version, we will disable the Watchdog timer in Setup.
 //v14.00 - In this version, we will update v12 with a longer timeout in the connection process to 5 seconds.  This is needed due to recent changes in the Particle backend systems.
+//v14.01 - Trying a longer timout as 5 seconds does not seem to be long enough
+//v14.02 - Going to add another step to catch this issue potentially also going to take the penalty out of not connecting.
+//v15.00 - Major changes - working to stop or slow down the reset loop.
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(14);
+PRODUCT_VERSION(15);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="14.00";
+char currentPointRelease[6] ="15.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -258,8 +261,7 @@ void setup()                                        // Note: Disconnected Setup(
     Time.setTime(RTCTime);
   }
   else {                                                               // Special case, neither the RTC or the system clock is set, we need to connect and get the time
-    connectToParticleBlocking();
-    Particle.syncTime();                                               // Set the system clock here
+    if (connectToParticleBlocking()) Particle.syncTime();              // Set the system clock here if connection successful
   }
 
   DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
@@ -295,7 +297,7 @@ void setup()                                        // Note: Disconnected Setup(
   if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) { // Park is open let's get ready for the day                                                            
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) {         // If the system thinks we are connected, let's make sure that we are
-      connectToParticleBlocking();                                    // This may happen if there was an unexpected reset during park open hours
+      if (!connectToParticleBlocking()) sysStatus.connectedStatus = false;  // This may happen if there was an unexpected reset during park open hours - If connection fails - reset flag
     }
     takeMeasurements();                                               // Populates values so you can read them before the hour
     stayAwake = stayAwakeLong;                                        // Keeps Boron awake after reboot - helps with recovery
@@ -375,23 +377,30 @@ void loop()
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
     if (!sysStatus.connectedStatus) {
-      connectToParticleBlocking();                                    // Go to connect state to connect and will return from there
-      break;
+      if (!connectToParticleBlocking()) {                             // Go to connect state to connect and will return from there
+        if ((Time.now() - sysStatus.lastHookResponse) > 7200) {        // Only go to the ERROR stat if it has been over two hours
+          state = ERROR_STATE;
+          resetTimeStamp = millis();
+          break;
+        }
+      }                                    
     }
+
     if (Particle.connected()) {
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
       if (Time.hour() == sysStatus.openTime) dailyCleanup();          // Once a day, clean house and publish to Google Sheets
       else sendEvent();                                               // Send data to Ubidots but not at opening time as there is nothing to publish
   
       if (Time.hour() == sysStatus.openTime && sysStatus.openTime==0) sendEvent();    // Need this so we can get 24 hour reporting for non-sleeping devices
-
       webhookTimeStamp = millis();
       lastReportedTime = Time.now();
       state = RESP_WAIT_STATE;                                        // Wait for Response
     }
-    else {
-      resetTimeStamp = millis();
-      state = ERROR_STATE;
+    else {                                                            // In this case, the connection failed.  We will therefore skip this reporting period and go back to IDLE - try again next hour
+      stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
+      stayAwakeTimeStamp = millis();
+      lastReportedTime = Time.now();                                  // Even if we fail so it will delay retry until next hour
+      state = IDLE_STATE;
     }
     break;
 
@@ -418,25 +427,30 @@ void loop()
   case ERROR_STATE:                                                   // To be enhanced - where we deal with errors
     if (state != oldState) publishStateTransition();
     if (millis() > resetTimeStamp + resetWait) {
-      if ((Time.now() - sysStatus.lastConnection) > 7200) {         // It is been over two hours since we last connected to the cloud - time for a reset
+
+      // The first two conditions imply that there is a connectivity issue - reset the modem
+      if ((Time.now() - sysStatus.lastConnection) > 7200L) {           // It is been over two hours since we last connected to the cloud - time for a reset
+        sysStatus.lastConnection = Time.now() - 3600;                 // Wait an hour before we come back to this condition
         fram.put(FRAM::systemStatusAddr,sysStatus);
-        Log.info("failed to connect to cloud, doing deep reset");
+        Log.error("failed to connect to cloud, doing deep reset");
         delay(100);
         //ab1805.deepPowerDown();                                     // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
-        System.reset();                                               // This is a test to see if we can fix the excessive power usage 
-      }
-      if (sysStatus.resetCount <= 3) {                                // First try simple reset
-        if (Particle.connected()) publishQueue.publish("State","Error State - Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
-        delay(2000);
-        System.reset();
+        fullModemReset();                                             // Full Modem reset and reboot
       }
       else if (Time.now() - sysStatus.lastHookResponse > 7200L) { //It has been more than two hours since a sucessful hook response
         if (Particle.connected()) publishQueue.publish("State","Error State - Power Cycle", PRIVATE, WITH_ACK);  // Broadcast Reset Action
-        delay(2000);
+        delay(2000);                                                  // Time to publish
         sysStatus.resetCount = 0;                                     // Zero the ResetCount
+        sysStatus.lastHookResponse = Time.now() - 3600;               // Give it an hour before we act on this condition again
         systemStatusWriteNeeded=true;
         //ab1805.deepPowerDown();                                     // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
-        System.reset();                                               // This is a test to see if we can fix the excessive power usage 
+        fullModemReset();                                             // Full Modem reset and reboot
+      }
+      // The next two are more general so a simple reset is all you need
+      else if (sysStatus.resetCount <= 3) {                                // First try simple reset
+        if (Particle.connected()) publishQueue.publish("State","Error State - Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
+        delay(2000);
+        System.reset();
       }
       else {                                                          // If we have had 3 resets - time to do something more
         if (Particle.connected()) publishQueue.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);            // Brodcase Reset Action
@@ -704,21 +718,21 @@ int setPowerConfig() {
 }
 
 
-void loadSystemDefaults() {                                         // Default settings for the device - connected, not-low power and always on
-  connectToParticleBlocking();                                              // Get connected to Particle - sets sysStatus.connectedStatus to true
+void loadSystemDefaults() {                                           // Default settings for the device - connected, not-low power and always on
+  connectToParticleBlocking();                                        // Get connected to Particle - sets sysStatus.connectedStatus to true
   if (Particle.connected()) publishQueue.publish("Mode","Loading System Defaults", PRIVATE, WITH_ACK);
   sysStatus.structuresVersion = 1;
   sysStatus.verboseMode = false;
   sysStatus.clockSet = false;
   sysStatus.lowBatteryMode = false;
   setLowPowerMode("1");
-  sysStatus.timezone = -5;                                          // Default is East Coast Time
+  sysStatus.timezone = -5;                                            // Default is East Coast Time
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
   sysStatus.closeTime = 21;
   sysStatus.solarPowerMode = true;  
-  sysStatus.lastConnectionDuration = 0;                             // New measure
-  fram.put(FRAM::systemStatusAddr,sysStatus);                       // Write it now since this is a big deal and I don't want values over written
+  sysStatus.lastConnectionDuration = 0;                               // New measure
+  fram.put(FRAM::systemStatusAddr,sysStatus);                         // Write it now since this is a big deal and I don't want values over written
 }
 
  /**
@@ -780,42 +794,47 @@ void makeUpParkHourStrings() {
  * than 10. You can set it higher if you want.
  * Code modified from the application watchdog app note: https://github.com/rickkas7/AB1805_RK
  * 
- * @return 1 if successful, 0 if uncessful or resets device if it has been over two hours
+ * @return 1 if successfull, 0 if unsuccessfull
  */
 bool connectToParticleBlocking() {
-  unsigned long connectionStartTime = Time.now();                  // Start the clock
+  unsigned long connectionStartTime = Time.now();                 // Start the clock
   char connectionStr[32];
+  const int timeInSecToWaitForConnectedToBeTrue = 10;
 
   Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
   Particle.connect();
 
-  for (unsigned int retry = 0; retry < connectMaxTimeSec && !waitFor(Particle.connected,5000); retry = retry + 5) {   // wait 5 seconds and repeat
-    if(sensorDetect) recordCount();                               // service the interrupt every second
+  for (unsigned int retry = 0; retry < connectMaxTimeSec && !waitFor(Particle.connected,timeInSecToWaitForConnectedToBeTrue*1000); retry+=timeInSecToWaitForConnectedToBeTrue) {   // wait 10 seconds and repeat
+    if(sensorDetect) recordCount();                               // service the interrupt every cycle
     Particle.process();                                           // Keeps the device responsive as it is not traversing the main loop
     ab1805.setWDT(-1);                                            // Pet the watchdog as we are out of the main loop for a long time.
   }
 
+  // Keep track of how long it took us to connect or max time if not
+  sysStatus.lastConnectionDuration = Time.now() - connectionStartTime;
+  if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = connectMaxTimeSec;           // This is clearly an erroneous result
+  if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
+  snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
+  Log.info(connectionStr);
+  if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
+
+  systemStatusWriteNeeded = true;
+  currentCountsWriteNeeded = true;
+
+  waitFor(Particle.connected, 10000);                             // Another check - are we truly connected? This is stupid, I know!
+
   if (Particle.connected()) {                                     // We were able to connect within the alotted time. record the event and publish
     sysStatus.connectedStatus = true;
     sysStatus.lastConnection = Time.now();
-    sysStatus.lastConnectionDuration = Time.now() - connectionStartTime;
-    if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = 0;  // This is clearly an erroneous result
-
-    if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
-    
-    snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);
-    Log.info(connectionStr);
-    if (sysStatus.verboseMode) publishQueue.publish("Cellular",connectionStr,PRIVATE);
-    systemStatusWriteNeeded = true;
-    currentCountsWriteNeeded = true;
     return 1;                                                     // Were able to connect successfully
   }
-  else {                                                          // We did not connect in time.  Record the event and to an "enable" pin reset of the device (modem too)
+  else {                                                          // We did not connect in time.  We will no longer send you automatically to the ERROR_STATE
+    if (Time.now() - sysStatus.lastConnection > 7200) {            // Only sends to ERROR_STATE if it has been over 3 hours
+      state = ERROR_STATE;     
+      resetTimeStamp = millis();
+    }
     sysStatus.connectedStatus = false;
     Log.info("cloud connection unsuccessful");
-    resetTimeStamp = millis();
-    state = ERROR_STATE;
-    systemStatusWriteNeeded = true;
     return 0;                                                     // Failed to connect will never get to this line
   }
 }
@@ -1088,19 +1107,19 @@ int setLowPowerMode(String command)                                   // This is
   {
     if (Particle.connected()) {
       publishQueue.publish("Mode","Low Power Mode", PRIVATE, WITH_ACK);
+      delay(1000);                                                    // Make sure the message gets out
     }
     sysStatus.lowPowerMode = true;
     strncpy(lowPowerModeStr,"Low Power", sizeof(lowPowerModeStr));
   }
   else if (command == "0")                                            // Command calls for clearing lowPowerMode
   {
-    if (!Particle.connected()) {                                      // In case we are not connected, we will do so now.
-      connectToParticleBlocking();
-    }
     publishQueue.publish("Mode","Normal Operations", PRIVATE, WITH_ACK);
-    delay(1000);                                                      // Need to make sure the message gets out.
     sysStatus.lowPowerMode = false;                                   // update the variable used for console status
     strncpy(lowPowerModeStr,"Not Low Power", sizeof(lowPowerModeStr));        // Use capitalization so we know that we set this.
+    if (!Particle.connected()) {                                      // In case we are not connected, we will do so now.
+      connectToParticleBlocking();                                    // Will connect - if connection fails, will need to reset device
+    }
   }
   systemStatusWriteNeeded = true;
   return 1;
