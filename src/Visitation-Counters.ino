@@ -43,13 +43,14 @@
 //v14.02 - Going to add another step to catch this issue potentially also going to take the penalty out of not connecting.
 //v15.00 - Major changes - working to stop or slow down the reset loop.
 //v16.00 - Moving the Particle connection function to the main loop to eliminate blocking issue.  Removed line from ResponseWait that was causing repeated session restarts
+//v17.00 - Added a line in setup to fix connectedStatus.  Fixed issue with multiple sends for non-lowPowerMode devices.
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(16);
+PRODUCT_VERSION(17);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="16.00";
+char currentPointRelease[6] ="17.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -287,6 +288,7 @@ void setup()                                        // Note: Disconnected Setup(
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) {         // If the system thinks we are connected, let's make sure that we are
       particleConnectionNeeded = true;                                // Raise this flag and we will connect once we enter the main loop
+      sysStatus.connectedStatus = false;                              // At least for now, this is the correct state value
     }
     takeMeasurements();                                               // Populates values so you can read them before the hour
     stayAwake = stayAwakeLong;                                        // Keeps Boron awake after reboot - helps with recovery
@@ -373,7 +375,7 @@ void loop()
       if (oldState == REPORTING_STATE) returnToReporting = true;
       else returnToReporting = false;                                 // Need to set value each time - just to be clear
       publishStateTransition();
-      connectionStartTime = Time.now();                 // Start the clock first time we enter the state
+      connectionStartTime = Time.now();                               // Start the clock first time we enter the state
       Cellular.on();                                                  // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
       Particle.connect();                                             // Told the Particle to connect, now we need to wait
     }
@@ -382,6 +384,7 @@ void loop()
       particleConnectionNeeded = false;                               // Connected so we don't need this flag
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();                          // This is the last time we attempted to connect
+      Log.info("Cloud connection successful");
     }
     else if ((Time.now() - connectionStartTime) > connectMaxTimeSec) {
       particleConnectionNeeded = false;                               // Timed out so we will give up until the next hour
@@ -410,9 +413,10 @@ void loop()
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
 
+    lastReportedTime = Time.now();                                  // We are only going to try once
+
     if (!sysStatus.connectedStatus) {                                 // Asking us to report but not connected
       particleConnectionNeeded = true;                                // Set the flag to connect us to Particle
-      lastReportedTime = Time.now();                                  // We are only going to try once
       state = CONNECTING_STATE;                                       // Will send us to connecting state - and it will send us back here                                             
       break;
     }
