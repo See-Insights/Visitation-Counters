@@ -44,13 +44,14 @@
 //v15.00 - Major changes - working to stop or slow down the reset loop.
 //v16.00 - Moving the Particle connection function to the main loop to eliminate blocking issue.  Removed line from ResponseWait that was causing repeated session restarts
 //v17.00 - Added a line in setup to fix connectedStatus.  Fixed issue with multiple sends for non-lowPowerMode devices.
+//v18.00 - Updated Full modem Reset
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(17);
+PRODUCT_VERSION(18);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="17.00";
+char currentPointRelease[6] ="18.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -391,6 +392,7 @@ void loop()
       if ((Time.now() - sysStatus.lastConnection) > 7200) {             // Only sends to ERROR_STATE if it has been over 2 hours
         state = ERROR_STATE;     
         resetTimeStamp = millis();
+        break;
       }
       sysStatus.connectedStatus = false;
       Log.info("cloud connection unsuccessful");
@@ -408,7 +410,7 @@ void loop()
       if (sysStatus.connectedStatus && returnToReporting) state = REPORTING_STATE;    // If we came here from reporting, this will send us back
       else state = IDLE_STATE;                                             // We are connected so, we can go to the IDLE state
     }
-  }
+  } break;
 
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
@@ -1132,18 +1134,21 @@ void publishStateTransition(void)
  * Adapted form Rikkas7's https://github.com/rickkas7/electronsample.
  */
 void fullModemReset() {  // 
-	Particle.disconnect(); 	                                         // Disconnect from the cloud
-	unsigned long startTime = millis();  	                           // Wait up to 15 seconds to disconnect
-	while(sysStatus.connectedStatus && millis() - startTime < 15000) {
-		delay(100);
-	}
+	Particle.disconnect(); 	                                          // Disconnect from the cloud    
+	waitFor(Particle.connected, 15000);                               // Wait up to 15 seconds to disconnect
 	// Reset the modem and SIM card
-	// 16:MT silent reset (with detach from network and saving of NVM parameters), with reset of the SIM card
-  Cellular.off();
-	// Cellular.command(30000, "AT+CFUN=15\r\n");
-	delay(1000);
-	// Go into deep sleep for 10 seconds to try to reset everything. This turns off the modem as well.
-	System.sleep(SLEEP_MODE_DEEP, 10);
+  Cellular.off();                                                   // Turn off the Cellular modem
+  waitFor(Cellular.isOff, 30000);                                   // New feature with deviceOS@2.1.0
+
+  ab1805.stopWDT();                                                 // No watchdogs interrupting our slumber
+                                             
+  config.mode(SystemSleepMode::ULTRA_LOW_POWER)
+    .gpio(userSwitch,CHANGE)
+    .duration(10 * 1000);
+
+
+  System.sleep(config);                                             // Put the device to sleep device reboots from here   
+  ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
 }
 
 /**
