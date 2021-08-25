@@ -45,13 +45,16 @@
 //v16.00 - Moving the Particle connection function to the main loop to eliminate blocking issue.  Removed line from ResponseWait that was causing repeated session restarts
 //v17.00 - Added a line in setup to fix connectedStatus.  Fixed issue with multiple sends for non-lowPowerMode devices.
 //v18.00 - Updated Full modem Reset
+//v19.00 - Recompiled for deviceOS@2.0.1 so we could update low-bandwidth devices.  Had to comment out the Cellular.isOff() in two places.  Need to add an update handler
+//v20.00 - For the Wake County counters and new default going forward standard day is 6am to 10pm.  This update will force the 10pm close and this will be removed for future releases keeping the "system defaults to 10pm"
+//v21.00 - Numerous Updates: 1) Enforce 20% charge minimum to connect, 
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(18);
+PRODUCT_VERSION(21);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="18.00";
+char currentPointRelease[6] ="21.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -259,6 +262,12 @@ void setup()                                        // Note: Disconnected Setup(
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
   sensorControl(true);                                                // Turn on the sensor
+
+  // This section to be removed after this release is deployed to all devices
+  if (sysStatus.closeTime == 21) {
+    sysStatus.closeTime = 22;
+    systemStatusWriteNeeded = true;
+  }
 
   // Make up the strings to make console values easier to read
   makeUpParkHourStrings();                                            // Create the strings for the console
@@ -767,7 +776,7 @@ void loadSystemDefaults() {                                           // Default
   sysStatus.timezone = -5;                                            // Default is East Coast Time
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
-  sysStatus.closeTime = 21;
+  sysStatus.closeTime = 22;                                           // New standard with v20
   sysStatus.solarPowerMode = true;  
   sysStatus.lastConnectionDuration = 0;                               // New measure
   fram.put(FRAM::systemStatusAddr,sysStatus);                         // Write it now since this is a big deal and I don't want values over written
@@ -832,7 +841,7 @@ bool disconnectFromParticle()                                     // Ensures we 
   waitForNot(Particle.connected, 15000);                          // make sure before turning off the cellular modem
   Cellular.disconnect();                                          // Disconnect from the cellular network
   Cellular.off();                                                 // Turn off the cellular modem
-  waitFor(Cellular.isOff, 30000);                                 // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
+  // waitFor(Cellular.isOff, 30000);                                 // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
   sysStatus.connectedStatus = false;
   systemStatusWriteNeeded = true;
   return true;
@@ -1138,7 +1147,7 @@ void fullModemReset() {  //
 	waitFor(Particle.connected, 15000);                               // Wait up to 15 seconds to disconnect
 	// Reset the modem and SIM card
   Cellular.off();                                                   // Turn off the Cellular modem
-  waitFor(Cellular.isOff, 30000);                                   // New feature with deviceOS@2.1.0
+  // waitFor(Cellular.isOff, 30000);                                   // New feature with deviceOS@2.1.0
 
   ab1805.stopWDT();                                                 // No watchdogs interrupting our slumber
                                              
