@@ -862,6 +862,7 @@ void makeUpParkHourStrings() {
 bool disconnectFromParticle()                                     // Ensures we disconnect cleanly from Particle
                                                                   // Updated based onthis thread: https://community.particle.io/t/waitfor-particle-connected-timeout-does-not-time-out/59181
 {
+  Log.info("In the disconnect from Particle function");
   Particle.disconnect();
   waitForNot(Particle.connected, 15000);                          // make sure before turning off the cellular modem
   Cellular.disconnect();                                          // Disconnect from the cellular network
