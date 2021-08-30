@@ -50,12 +50,13 @@
 //v21.00 - Major Update - 1) Queueing only Webhooks, 2) New PublishSyncPOSIX, 3) No more "in flight" counts 4) Enforce low battery limits 
 //v21.01 - Fixed error that slowed device going to sleep.
 //v21.02 - Removed conditional connection code used for testing and added logic to report every other hour when capacity is less than 65%
+//v21.03 - Fixed but that caused multiple reports when the battery is low
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(21);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="21.02";
+char currentPointRelease[6] ="21.03";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -298,7 +299,7 @@ void setup()                                        // Note: Disconnected Setup(
   if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) { // Park is open let's get ready for the day                                                            
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) {         // If the system thinks we are connected, let's make sure that we are
-      particleConnectionNeeded = false;                                // Raise this flag and we will connect once we enter the main loop
+      particleConnectionNeeded = true;                                // Raise this flag and we will connect once we enter the main loop
       sysStatus.connectedStatus = false;                              // At least for now, this is the correct state value
     }
     stayAwake = stayAwakeLong;                                        // Keeps Boron awake after reboot - helps with recovery
@@ -422,16 +423,16 @@ void loop()
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
 
-    takeMeasurements();                                               // Take Measurements here for reporting
-
-    if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
-    else sendEvent();                                                 // Publish hourly but not at opening time as there is nothing to publish
-    if (Time.hour() == sysStatus.openTime && sysStatus.openTime==0) sendEvent();    // Need this so we can get 24 hour reporting for non-sleeping devices
-
-    lastReportedTime = Time.now();                                    // We are only going to report once each hour.  We may or may not connect to Particle
+    lastReportedTime = Time.now();                                    // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
+    state = IDLE_STATE;                                               // Like I said, only once per hour - unless it is coming back from connecting
 
     if (!sysStatus.connectedStatus) {                                 // What do we do if we are not currently connected - published to RAM already so connecting is optional
-      if (sysStatus.batteryState <= 65 && (Time.hour() % 2)) {        // If the battery level is under 65%, only connect every other (odd) hour
+      if (sysStatus.stateOfCharge > 65) {
+          particleConnectionNeeded = true;                            // Set the flag to connect us to Particle
+          state = CONNECTING_STATE;                                   // Will send us to connecting state - and it will send us back here                                             
+          break; 
+      }
+      else if (sysStatus.stateOfCharge <= 65 && (Time.hour() % 2)) {  // If the battery level is under 65%, only connect every other (odd) hour
         if (!sysStatus.lowBatteryMode) {                              // as long as we are not in low Battery Mode
           particleConnectionNeeded = true;                            // Set the flag to connect us to Particle
           state = CONNECTING_STATE;                                   // Will send us to connecting state - and it will send us back here                                             
@@ -443,6 +444,13 @@ void loop()
       webhookTimeStamp = millis();                                    // We are connected and we have published, head to the response wait state
       state = RESP_WAIT_STATE;                                        // Wait for Response
     }
+
+    takeMeasurements();                                               // Take Measurements here for reporting
+
+    if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
+    else sendEvent();                                                 // Publish hourly but not at opening time as there is nothing to publish
+    if (Time.hour() == sysStatus.openTime && sysStatus.openTime==0) sendEvent();    // Need this so we can get 24 hour reporting for non-sleeping devices
+
     break;
 
   case RESP_WAIT_STATE:
