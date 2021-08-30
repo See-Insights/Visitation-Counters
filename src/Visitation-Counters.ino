@@ -48,13 +48,14 @@
 //v19.00 - Recompiled for deviceOS@2.0.1 so we could update low-bandwidth devices.  Had to comment out the Cellular.isOff() in two places.  Need to add an update handler
 //v20.00 - For the Wake County counters and new default going forward standard day is 6am to 10pm.  This update will force the 10pm close and this will be removed for future releases keeping the "system defaults to 10pm"
 //v21.00 - Major Update - 1) Queueing only Webhooks, 2) New PublishSyncPOSIX, 3) No more "in flight" counts 4) Enforce low battery limits 
-
+//v21.01 - Fixed error that slowed device going to sleep.
+//v21.02 - Removed conditional connection code used for testing and added logic to report every other hour when capacity is less than 65%
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(21);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="21.00";
+char currentPointRelease[6] ="21.02";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -336,11 +337,9 @@ void loop()
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep device reboots from here   
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
-    fuel.wakeup();                                                     // Make sure that the fuel gauge wakes quickly 
-    fuel.quickStart();
     if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
       setLowPowerMode("0");
-      sysStatus.openTime = 0;
+      sysStatus.openTime = 0;                                          // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
       sysStatus.closeTime = 24;
     }
     if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
@@ -354,19 +353,17 @@ void loop()
 
   case NAPPING_STATE: {  // This state puts the device in low power mode quickly
     if (state != oldState) publishStateTransition();
-    if (sensorDetect || countSignalTimer.isActive()) break;           // Don't nap until we are done with event
-    if (sysStatus.connectedStatus) disconnectFromParticle();          // If we are in connected mode we need to Disconnect from Particle
-    stayAwake = 1000;                                                 // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour
-    ab1805.stopWDT();                                                 // If we are sleeping, we will miss petting the watchdog
+    if (sensorDetect || countSignalTimer.isActive())  break;           // Don't nap until we are done with event
+    if (sysStatus.connectedStatus) disconnectFromParticle();           // If we are in connected mode we need to Disconnect from Particle
+    stayAwake = 1000;                                                  // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour
+    ab1805.stopWDT();                                                  // If we are sleeping, we will miss petting the watchdog
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
     config.mode(SystemSleepMode::ULTRA_LOW_POWER)
       .gpio(userSwitch,CHANGE)
       .gpio(intPin,RISING)
       .duration(wakeInSeconds * 1000);
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
-      ab1805.resumeWDT();                                              // Wakey Wakey - WDT can resume
-      fuel.wakeup();                                                   // Make sure that the fuel gauge wakes quickly 
-    fuel.quickStart();
+    ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
       stayAwakeTimeStamp = millis();
     }
@@ -396,7 +393,7 @@ void loop()
     }
     else if ((Time.now() - connectionStartTime) > connectMaxTimeSec) {
       particleConnectionNeeded = false;                               // Timed out so we will give up until the next hour
-      if ((Time.now() - sysStatus.lastConnection) > 7200) {             // Only sends to ERROR_STATE if it has been over 2 hours
+      if ((Time.now() - sysStatus.lastConnection) > 10800) {          // Only sends to ERROR_STATE if it has been over three hours - this ties to reporting
         state = ERROR_STATE;     
         resetTimeStamp = millis();
         break;
@@ -411,14 +408,14 @@ void loop()
       if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
       snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
       Log.info(connectionStr);
-      if (sysStatus.verboseMode && sysStatus.connectedStatus) {
+      if (sysStatus.verboseMode && sysStatus.connectedStatus) {       // If we connected, let's publish the connection time
         waitUntil(meterParticlePublish);
         Particle.publish("Cellular",connectionStr,PRIVATE);
       }
       systemStatusWriteNeeded = true;
       currentCountsWriteNeeded = true;
-      if (sysStatus.connectedStatus && returnToReporting) state = REPORTING_STATE;    // If we came here from reporting, this will send us back
-      else state = IDLE_STATE;                                             // We are connected so, we can go to the IDLE state
+      if (sysStatus.connectedStatus && returnToReporting) state = REPORTING_STATE;    // If we came here from reporting, this will send us back - if we connected
+      else state = IDLE_STATE;                                        // We are connected or the reporting connection attempt failed, either way, back to the IDLE state
     }
   } break;
 
@@ -427,30 +424,24 @@ void loop()
 
     takeMeasurements();                                               // Take Measurements here for reporting
 
-    if (Time.hour() == sysStatus.openTime) dailyCleanup();          // Once a day, clean house and publish to Google Sheets
-    else sendEvent();                                               // Send data to Ubidots but not at opening time as there is nothing to publish
+    if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
+    else sendEvent();                                                 // Publish hourly but not at opening time as there is nothing to publish
     if (Time.hour() == sysStatus.openTime && sysStatus.openTime==0) sendEvent();    // Need this so we can get 24 hour reporting for non-sleeping devices
 
-    lastReportedTime = Time.now();                                    // We are only going to try once
+    lastReportedTime = Time.now();                                    // We are only going to report once each hour.  We may or may not connect to Particle
 
-    if (!digitalRead(userSwitch)) {                                   // This is just for testing - will not connect until we are pushing the userSwitch - remove this line after test
-
-    if (!sysStatus.connectedStatus && !sysStatus.lowBatteryMode) {    // Asking us to report but not connected
-      particleConnectionNeeded = true;                                // Set the flag to connect us to Particle
-      state = CONNECTING_STATE;                                       // Will send us to connecting state - and it will send us back here                                             
-      break;
+    if (!sysStatus.connectedStatus) {                                 // What do we do if we are not currently connected - published to RAM already so connecting is optional
+      if (sysStatus.batteryState <= 65 && (Time.hour() % 2)) {        // If the battery level is under 65%, only connect every other (odd) hour
+        if (!sysStatus.lowBatteryMode) {                              // as long as we are not in low Battery Mode
+          particleConnectionNeeded = true;                            // Set the flag to connect us to Particle
+          state = CONNECTING_STATE;                                   // Will send us to connecting state - and it will send us back here                                             
+          break;                                                      // Leave this state and go connect - will return only if we are successful in connecting
+        }
+      }
     }
-    
-    }                                                                 // Remove this line after test
-
-    if (sysStatus.connectedStatus) {
-      webhookTimeStamp = millis();                                    // This is for a webHook response timeout
+    else {
+      webhookTimeStamp = millis();                                    // We are connected and we have published, head to the response wait state
       state = RESP_WAIT_STATE;                                        // Wait for Response
-    }
-    else {                                                            // In this case, the connection failed.  We will therefore skip this reporting period and go back to IDLE - try again next hour
-      stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
-      stayAwakeTimeStamp = millis();
-      state = IDLE_STATE;
     }
     break;
 
@@ -666,26 +657,29 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
 // These are the functions that are part of the takeMeasurements call
 void takeMeasurements()
 {
-  if (Cellular.ready()) getSignalStrength();                          // Test signal strength if the cellular modem is on and ready
+  if (Cellular.ready()) getSignalStrength();                           // Test signal strength if the cellular modem is on and ready
 
-  getTemperature();                                                   // Get Temperature at startup as well
+  getTemperature();                                                    // Get Temperature at startup as well
   
   // Battery Releated actions
-  sysStatus.batteryState = System.batteryState();                     // Call before isItSafeToCharge() as it may overwrite the context
+  sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
 
-  if (!isItSafeToCharge()) current.alertCount++;                      // Increment the alert count
+  if (!isItSafeToCharge()) current.alertCount++;                       // Increment the alert count
 
   // This section is a fix for a problem that I hope gets fixed in a future deviceOS update - Inaccurate state of charge when measring after sleep
-  fuel.wakeup();                                                      //wake up the Fuel Gauge chip
-  delay(500);                                                         // https://community.particle.io/t/sleepy-boron-soc-not-updating/55086/37
-  sysStatus.stateOfCharge = int(fuel.getSoC());                       // Assign to system value
+  fuel.wakeup();                                                       //wake up the Fuel Gauge chip
+  delay(500);                                                          // https://community.particle.io/t/sleepy-boron-soc-not-updating/55086/37
+  sysStatus.stateOfCharge = int(fuel.getSoC());                        // Assign to system value
 
   if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
-    System.setPowerConfiguration(SystemPowerConfiguration());         // Reset the PMIC
+    System.setPowerConfiguration(SystemPowerConfiguration());          // Reset the PMIC
   }
   if (sysStatus.stateOfCharge < current.minBatteryLevel) current.minBatteryLevel = sysStatus.stateOfCharge; // Keep track of lowest value for the day
-  if (sysStatus.stateOfCharge < 30) sysStatus.lowBatteryMode = true;  // Check to see if we are in low battery territory
-  else sysStatus.lowBatteryMode = false;                              // We have sufficient to continue operations
+  if (sysStatus.stateOfCharge < 30) {
+    sysStatus.lowBatteryMode = true;                                   // Check to see if we are in low battery territory
+    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...                               
+  }
+  else sysStatus.lowBatteryMode = false;                               // We have sufficient to continue operations
   systemStatusWriteNeeded = true;
   currentCountsWriteNeeded = true;
 }
@@ -867,7 +861,7 @@ bool disconnectFromParticle()                                     // Ensures we 
   waitForNot(Particle.connected, 15000);                          // make sure before turning off the cellular modem
   Cellular.disconnect();                                          // Disconnect from the cellular network
   Cellular.off();                                                 // Turn off the cellular modem
-  // waitFor(Cellular.isOff, 30000);                                 // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
+  waitFor(Cellular.isOff, 30000);                                 // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
   sysStatus.connectedStatus = false;
   systemStatusWriteNeeded = true;
   return true;
