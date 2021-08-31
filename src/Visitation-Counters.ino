@@ -62,7 +62,7 @@
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(21);
+PRODUCT_VERSION(22);
 #define DSTRULES isDSTusa
 char currentPointRelease[6] ="22.00";
 
