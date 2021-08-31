@@ -10,6 +10,12 @@
 *   This software will work with both pressure and PIR sensor counters
 */
 
+/* Alert Count Hierarchy - lower is less important
+* 1 = Battery temp too high / low to charge
+* 2 = Failed to connect to Particle 
+* 3 = Failed to get Webhook response when connected
+*/
+
 //v1 - Adapted from the Boron Connected Counter Code at release v10
 //v2 - Made some significant improvements: temp dependent charging, avoiding use of "enable" sleep, better battery "context" - 
 //V3 - defaults to trail counters
@@ -51,12 +57,14 @@
 //v21.01 - Fixed error that slowed device going to sleep.
 //v21.02 - Removed conditional connection code used for testing and added logic to report every other hour when capacity is less than 65%
 //v21.03 - Fixed but that caused multiple reports when the battery is low
+//v21.04 - Found an issue that lost the current daily count
+//v22.00 - Fixed an issue in the structure of the current counts srray that caused a loss of daily count data.  Changed the way that Alerts are coded: (1 - too hot or cold, 2 - timed out connection, 3 - timed out webhook)
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(21);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="21.03";
+char currentPointRelease[6] ="22.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -71,6 +79,7 @@ const int FRAMversionNumber = 3;                    // Increment this number eac
 
 struct currentCounts_structure {                    // currently 10 bytes long
   int hourlyCount;                                  // In period hourly count
+  int placeHolderInteger;                           // So we don't loose the daily count on updates.
   int dailyCount;                                   // In period daily count
   unsigned long lastCountTime;                      // When did we record our last count
   int temperature;                                  // Current Temperature
@@ -336,12 +345,13 @@ void loop()
     config.mode(SystemSleepMode::ULTRA_LOW_POWER)
       .gpio(userSwitch,CHANGE)
       .duration(wakeInSeconds * 1000);
-    SystemSleepResult result = System.sleep(config);                   // Put the device to sleep device reboots from here   
+    SystemSleepResult result = System.sleep(config);                   // Put the device to sleep device continues operations from here
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
       setLowPowerMode("0");
       sysStatus.openTime = 0;                                          // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
       sysStatus.closeTime = 24;
+      systemStatusWriteNeeded = true;
     }
     if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
       sensorControl(true);                                             // Turn off the sensor module for the hour
@@ -350,6 +360,7 @@ void loop()
       stayAwake = stayAwakeLong;                                       // Keeps Boron awake after deep sleep - may not be needed
     }
     state = IDLE_STATE;                                                // Head back to the idle state to see what to do next
+
     } break;
 
   case NAPPING_STATE: {  // This state puts the device in low power mode quickly
@@ -390,6 +401,7 @@ void loop()
       particleConnectionNeeded = false;                               // Connected so we don't need this flag
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();                          // This is the last time we attempted to connect
+      if (current.alertCount == 2) current.alertCount = 0;            // Reset this flag if needed
       Log.info("Cloud connection successful");
     }
     else if ((Time.now() - connectionStartTime) > connectMaxTimeSec) {
@@ -399,6 +411,7 @@ void loop()
         resetTimeStamp = millis();
         break;
       }
+      current.alertCount = 2;
       sysStatus.connectedStatus = false;
       Log.info("cloud connection unsuccessful");
     } 
@@ -413,11 +426,12 @@ void loop()
         waitUntil(meterParticlePublish);
         Particle.publish("Cellular",connectionStr,PRIVATE);
       }
-      systemStatusWriteNeeded = true;
-      currentCountsWriteNeeded = true;
       if (sysStatus.connectedStatus && returnToReporting) state = REPORTING_STATE;    // If we came here from reporting, this will send us back - if we connected
       else state = IDLE_STATE;                                        // We are connected or the reporting connection attempt failed, either way, back to the IDLE state
     }
+    systemStatusWriteNeeded = true;
+    currentCountsWriteNeeded = true;
+
   } break;
 
   case REPORTING_STATE:
@@ -461,12 +475,17 @@ void loop()
     if (!dataInFlight)  {                                             // Response received --> back to IDLE state
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
+      if (current.alertCount == 3) current.alertCount = 0;            // Reset this flag if needed
       state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
+      current.alertCount = 3;                                         // Raise the missed webhook flag
       state = ERROR_STATE;                                            // Response timed out
     }
+    currentCountsWriteNeeded = true;
+    systemStatusWriteNeeded = true;
+
     break;
 
   case ERROR_STATE:                                                   // To be enhanced - where we deal with errors
@@ -672,7 +691,7 @@ void takeMeasurements()
   // Battery Releated actions
   sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
 
-  if (!isItSafeToCharge()) current.alertCount++;                       // Increment the alert count
+  isItSafeToCharge();                                                  // See if it is safe to charge
 
   // This section is a fix for a problem that I hope gets fixed in a future deviceOS update - Inaccurate state of charge when measring after sleep
   fuel.wakeup();                                                       //wake up the Fuel Gauge chip
@@ -698,10 +717,12 @@ bool isItSafeToCharge()                                               // Returns
   if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
     pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
     sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
+    current.alertCount = 1;                                           // Set a value of 1 indicating that it is not safe to charge due to high / low temps
     return false;
   }
   else {
     pmic.enableCharging();                                            // It is safe to charge the battery
+    if (current.alertCount == 1) current.alertCount = 0;              // Reset this flag if needed
     return true;
   }
 }
