@@ -6,7 +6,7 @@
 struct systemStatus_structure {  
   uint8_t structuresVersion;                        // Version of the data structures (system and data)
   uint8_t placeholder;                              // available for future use
-  bool clockSet;                                    // Tells us if we need to connect and set the RTC
+  bool verboseCounts;                               // Tells us if we are sending verbose count webhooks
   bool connectedStatus;                             // Are we connected?
   bool verboseMode;                                 // Turns on extra messaging
   bool solarPowerMode;                              // Powered by a solar panel or utility power
