@@ -64,12 +64,13 @@
 //v25.00 - Fixed issue where not low power device looses connection to Particle cloud - also turns off cell radio after time out connecting
 //v26.00 - Simplified ERROR state, got rid of FullModemReset and cleaned up little nits to shorted code.  Added Real-Time Audit feature.
 //v27.00 - Updated color for testing to "Blue-Red" and streamlined the Connecting state flow.  Also, time wake sends to IDLE not CONNECTING and Failure to connect moves to LowPowerMode in Solar devices, reset clears verbose counting
+//v28.00 - Recompiled for deviceOS@2.2.0 - should bring better results for long connection times
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(27);
+PRODUCT_VERSION(28);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="27.00";
+char currentPointRelease[6] ="28.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
