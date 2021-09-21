@@ -10,10 +10,15 @@
 *   This software will work with both pressure and PIR sensor counters
 */
 
-/* Alert Count Hierarchy - lower is less important
+/* Alert Count Definitions
+* 0 = Normal Operations - No Alert
 * 1 = Battery temp too high / low to charge
 * 2 = Failed to connect to Particle 
 * 3 = Failed to get Webhook response when connected
+* 4 = Firmware update completed
+* 5 = Firmware update timed out
+* 6 = Firmware update failed
+* 7 = Update attempt limit reached - done for the day
 */
 
 //v1 - Adapted from the Boron Connected Counter Code at release v10
@@ -50,6 +55,7 @@
 //v15.00 - Major changes - working to stop or slow down the reset loop.
 //v16.00 - Moving the Particle connection function to the main loop to eliminate blocking issue.  Removed line from ResponseWait that was causing repeated session restarts
 //v17.00 - Added a line in setup to fix connectedStatus.  Fixed issue with multiple sends for non-lowPowerMode devices.
+// Particle back-end issue resolved - higher releases are all functional
 //v18.00 - Updated Full modem Reset
 //v19.00 - Recompiled for deviceOS@2.0.1 so we could update low-bandwidth devices.  Had to comment out the Cellular.isOff() in two places.  Need to add an update handler
 //v20.00 - For the Wake County counters and new default going forward standard day is 6am to 10pm.  This update will force the 10pm close and this will be removed for future releases keeping the "system defaults to 10pm"
@@ -65,12 +71,14 @@
 //v26.00 - Simplified ERROR state, got rid of FullModemReset and cleaned up little nits to shorted code.  Added Real-Time Audit feature.
 //v27.00 - Updated color for testing to "Blue-Red" and streamlined the Connecting state flow.  Also, time wake sends to IDLE not CONNECTING and Failure to connect moves to LowPowerMode in Solar devices, reset clears verbose counting
 //v28.00 - Recompiled for deviceOS@2.2.0 - should bring better results for long connection times
+//v29.00 - Adding a new state for receiving a firmware update - this state delays napping / sleeping to receive the update 
+//v30.00 - Same as v29 but compiled for deviceOS@2.2.0 - Keeps the firmware update state but with less debug messaging
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(28);
+PRODUCT_VERSION(30);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="28.00";
+char currentPointRelease[6] ="30.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -88,11 +96,12 @@ struct currentCounts_structure {                    // currently 10 bytes long
   int placeHolderInteger;                           // So we don't loose the daily count on updates.
   int dailyCount;                                   // In period daily count
   unsigned long lastCountTime;                      // When did we record our last count
-  int temperature;                                  // Current Temperature
-  int alertCount;                                   // What is the current alert count
+  int temperature;                                  // Current Temperature inside the enclosure
+  int alerts;                                       // What is the current alert value - see secret decoder ring at top of comments
   int maxMinValue;                                  // Highest count in one minute in the current period
   uint16_t maxConnectTime = 0;                      // Longest connect time for the day
   int minBatteryLevel = 100;                        // Lowest Battery level for the day
+  uint8_t updateAttempts = 0;                       // Number of attempted updates each day
 } current;
 
 
@@ -114,6 +123,8 @@ struct systemStatus_structure sysStatus;
 // exceeded, do a deep power down. This should not be less than 10 minutes. 11 minutes
 // is a reasonable value to use.
 unsigned long connectMaxTimeSec = 11 * 60;   // Timeout for trying to connect to Particle cloud in seconds
+// If updating, we need to delay sleep in order to give the download time to come through before sleeping
+const std::chrono::milliseconds firmwareUpdateMaxTime = 10min; // Set at least 5 minutes
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
@@ -133,8 +144,8 @@ SerialLogHandler logHandler(115200, LOG_LEVEL_INFO, {
 */
 
 // State Machine Variables
-enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE};
-char stateNames[8][14] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Connecting", "Reporting", "Response Wait"};
+enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE, FIRMWARE_UPDATE};
+char stateNames[9][16] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Connecting", "Reporting", "Response Wait", "Firmware Update"};
 State state = INITIALIZATION_STATE;
 State oldState = INITIALIZATION_STATE;
 
@@ -167,6 +178,7 @@ unsigned long connectionStartTime;
 // Program Variables
 volatile bool watchdogFlag;                         // Flag to let us know we need to pet the dog
 bool dataInFlight = false;                          // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
+bool firmwareUpdateInProgress = false;              // Helps us track if a firmware update is in progress
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 char batteryContextStr[16];                         // Tracks the battery context
 char lowPowerModeStr[16];                           // In low power mode?
@@ -206,6 +218,7 @@ void setup()                                        // Note: Disconnected Setup(
   String deviceID = System.deviceID();              // Multiple devices share the same hook - keeps things straight
   deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+  System.on(firmware_update, firmwareUpdateHandler);// Registers a handler that will track if we are getting an update
 
   Particle.variable("HourlyCount", current.hourlyCount);                // Define my Particle variables
   Particle.variable("DailyCount", current.dailyCount);                  // Note: Don't have to be connected for any of this!!!
@@ -217,7 +230,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("lowPowerMode",lowPowerModeStr);
   Particle.variable("OpenTime", openTimeStr);
   Particle.variable("CloseTime",closeTimeStr);
-  Particle.variable("Alerts",current.alertCount);
+  Particle.variable("Alerts",current.alerts);
   Particle.variable("TimeOffset",currentOffsetStr);
   Particle.variable("BatteryContext",batteryContextMessage);
   Particle.variable("SensorStatus",sensorTypeConfigStr);
@@ -266,6 +279,11 @@ void setup()                                        // Note: Disconnected Setup(
   }
 
   checkSystemValues();                                                // Make sure System values are all in valid range
+
+  if (current.updateAttempts >= 3) {
+    System.disableUpdates();                                          // We will only try to update three times in a day 
+    current.updateAttempts = 7;                                       // Set an alert that we have maxed out our updates for the day
+  }
 
   // Next we set the timezone and check is we are in daylight savings time
   Time.setDSTOffset(sysStatus.dstOffset);                             // Set the value from FRAM if in limits
@@ -325,8 +343,10 @@ void loop()
   case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
     if (state != oldState) publishStateTransition();
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;         // When in low power mode, we can nap between taps
+    if (firmwareUpdateInProgress) state= FIRMWARE_UPDATE;             // This means there is a firemware update on deck
     if (Time.hour() != Time.hour(lastReportedTime)) state = REPORTING_STATE;                                  // We want to report on the hour but not after bedtime
     if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
+
     break;
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
@@ -422,7 +442,6 @@ void loop()
     if (Particle.connected()) {
       sysStatus.connectedStatus = true;
       sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
-      if (current.alertCount == 2) current.alertCount = 0;             // Reset this flag if needed
       recordConnectionDetails();                                       // Record outcome of connection attempt
       Log.info("Cloud connection successful");
       attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable verbose counts
@@ -430,7 +449,7 @@ void loop()
       else state = IDLE_STATE;
     }
     else if (sysStatus.lastConnectionDuration > connectMaxTimeSec) {
-      current.alertCount = 2;
+      current.alerts = 2;
       sysStatus.connectedStatus = false;
       recordConnectionDetails();                                       // Record outcome of connection attempt
       Log.info("cloud connection unsuccessful");
@@ -448,11 +467,12 @@ void loop()
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
 
-    lastReportedTime = Time.now();                                     // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
+    lastReportedTime = Time.now();                                    // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
     takeMeasurements();                                               // Take Measurements here for reporting
     if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
     sendEvent();                                                      // Publish hourly but not at opening time as there is nothing to publish
-    state = CONNECTING_STATE;                                          // We are only passing through this state once each hour    
+    current.alerts = 0;                                               // Reset Alert after each reporting event
+    state = CONNECTING_STATE;                                         // We are only passing through this state once each hour    
 
     break;
 
@@ -468,12 +488,11 @@ void loop()
     if (!dataInFlight)  {                                             // Response received --> back to IDLE state
       stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
-      if (current.alertCount == 3) current.alertCount = 0;            // Reset this flag if needed
       state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
-      current.alertCount = 3;                                         // Raise the missed webhook flag
+      current.alerts = 3;                                         // Raise the missed webhook flag
       state = ERROR_STATE;                                            // Response timed out
     }
     currentCountsWriteNeeded = true;
@@ -517,6 +536,30 @@ void loop()
       }
     }
     break;
+
+    case FIRMWARE_UPDATE: {
+      static unsigned long stateTime;
+      char data[64];
+
+      if (state != oldState) {
+        stateTime = millis();                                          // When did we start the firmware update?
+        Log.info("In the firmware update state");
+        publishStateTransition();
+      }
+      if (!firmwareUpdateInProgress) {                                 // Done with the update 
+          Log.info("firmware update completed");
+          state = IDLE_STATE;
+      }
+      else
+      if (millis() - stateTime >= firmwareUpdateMaxTime.count()) {     // Ran out of time
+          Log.info("firmware update timed out");
+          current.alerts = 5;                                          // Record alert for timeout
+          snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+          PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
+          current.updateAttempts++;                                    // Increment the update attempt counter
+          state = IDLE_STATE;
+      }
+    } break;
   }
   // Take care of housekeeping items here
 
@@ -646,7 +689,7 @@ void sendEvent() {
   else {                                                              // If there were no events in the past hour/recording period, send the time when the last report was sent
     timeStampValue = lastReportedTime;                                // This should be the beginning of the current hour 
   }
-  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alertCount, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
+  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
   PublishQueuePosix::instance().publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
   current.hourlyCount = 0;                                            // Reset the hourly count
 }
@@ -694,6 +737,42 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
   }
 }
 
+/**
+ * @brief The Firmware update handler tracks changes in the firmware update status
+ * 
+ * @details This handler is subscribed to in setup with System.on event and sets the firmwareUpdateinProgress flag that 
+ * will trigger a state transition to the Firmware update state.  As some events are only see in this handler, failure
+ * and success success codes are assigned here and the time out code in the main loop state.
+ * 
+ * @param event  - Firmware update 
+ * @param param - Specific firmware update state
+ */
+
+void firmwareUpdateHandler(system_event_t event, int param) {
+  switch(param) {
+    char data[64];                                                     // Store the date in this character array - not global
+      
+    case firmware_update_begin:
+      firmwareUpdateInProgress = true;
+      break;
+    case firmware_update_complete:
+      firmwareUpdateInProgress = true;
+      current.alerts = 4;                                              // Record a successful attempt
+      snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+      PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
+      current.updateAttempts = 0;                                      // Zero the update attempts counter
+      break;
+    case firmware_update_failed:
+      firmwareUpdateInProgress = false;
+      snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+      PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publlish queue
+      current.alerts = 6;                                              // Record a failed attempt
+      current.updateAttempts++;                                        // Increment the update attempts counter
+      break;
+  }
+  currentCountsWriteNeeded = true;
+}
+
 // These are the functions that are part of the takeMeasurements call
 void takeMeasurements()
 {
@@ -730,12 +809,11 @@ bool isItSafeToCharge()                                               // Returns
   if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
     pmic.disableCharging();                                           // It is too cold or too hot to safely charge the battery
     sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
-    current.alertCount = 1;                                           // Set a value of 1 indicating that it is not safe to charge due to high / low temps
+    current.alerts = 1;                                               // Set a value of 1 indicating that it is not safe to charge due to high / low temps
     return false;
   }
   else {
     pmic.enableCharging();                                            // It is safe to charge the battery
-    if (current.alertCount == 1) current.alertCount = 0;              // Reset this flag if needed
     return true;
   }
 }
@@ -953,7 +1031,6 @@ int resetCounts(String command)                                        // Resets
     current.dailyCount = 0;                                            // Reset Daily Count in memory
     current.hourlyCount = 0;                                           // Reset Hourly Count in memory
     sysStatus.resetCount = 0;                                          // If so, store incremented number - watchdog must have done This
-    current.alertCount = 0;                                            // Reset count variables
     dataInFlight = false;
     currentCountsWriteNeeded = true;                                   // Make sure we write to FRAM back in the main loop
     systemStatusWriteNeeded = true;
@@ -994,12 +1071,11 @@ void resetEverything() {                                              // The dev
   current.dailyCount = 0;                                             // Reset the counts in FRAM as well
   current.hourlyCount = 0;
   current.lastCountTime = Time.now();                                 // Set the time context to the new day
-  sysStatus.resetCount = current.alertCount = 0;                      // Reset everything for the day
   current.maxConnectTime = 0;                                         // Reset values for this time period
   current.minBatteryLevel = 100;
   currentCountsWriteNeeded = true;
+  current.updateAttempts = 0;                                         // Reset the update attempts counter for the day
   currentCountsWriteNeeded=true;                                      // Make sure that the values are updated in FRAM
-  systemStatusWriteNeeded=true;
 }
 
 int setSolarMode(String command) // Function to force sending data in current hour
