@@ -72,7 +72,7 @@
 //v27.00 - Updated color for testing to "Blue-Red" and streamlined the Connecting state flow.  Also, time wake sends to IDLE not CONNECTING and Failure to connect moves to LowPowerMode in Solar devices, reset clears verbose counting
 //v28.00 - Recompiled for deviceOS@2.2.0 - should bring better results for long connection times
 //v29.00 - Adding a new state for receiving a firmware update - this state delays napping / sleeping to receive the update 
-//v30.00 - Same as v29 but compiled for deviceOS@2.2.0 - Keeps the firmware update state but with less debug messaging
+//v30.00 - Same as v29 but compiled for deviceOS@2.2.0 - Keeps the firmware update state but with less debug messaging.  One change - goes to reporting only every 2 hours at 65% and 4 hours less than 50%
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
@@ -282,7 +282,7 @@ void setup()                                        // Note: Disconnected Setup(
 
   if (current.updateAttempts >= 3) {
     System.disableUpdates();                                          // We will only try to update three times in a day 
-    current.updateAttempts = 7;                                       // Set an alert that we have maxed out our updates for the day
+    current.alerts = 7;                                               // Set an alert that we have maxed out our updates for the day
   }
 
   // Next we set the timezone and check is we are in daylight savings time
@@ -357,9 +357,9 @@ void loop()
       state = REPORTING_STATE;
       break;
     }
-    if (sysStatus.connectedStatus) disconnectFromParticle();          // Disconnect cleanly from Particle
+    if (sysStatus.connectedStatus) disconnectFromParticle();           // Disconnect cleanly from Particle
     state = IDLE_STATE;                                                // Head back to the idle state to see what to do next
-    ab1805.stopWDT();                                                 // No watchdogs interrupting our slumber
+    ab1805.stopWDT();                                                  // No watchdogs interrupting our slumber
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
     config.mode(SystemSleepMode::ULTRA_LOW_POWER)
       .gpio(userSwitch,CHANGE)
@@ -422,10 +422,15 @@ void loop()
         state = IDLE_STATE;
         break;
       }
-      // If we are in low power mode, we may bail if battery is too low and it is not an odd hour
+      // If we are in low power mode, we may bail if battery is too low and we need to reduce reporting frequency
       if (sysStatus.lowPowerMode && digitalRead(userSwitch)) {         // Low power mode and user switch not pressed
-        if (sysStatus.stateOfCharge <= 65 && !(Time.hour() % 2)) {     // If the battery level is under 65%, only connect every other (odd) hour
-          Log.info("Connecting state but low power mode - next hour"); 
+        if (sysStatus.stateOfCharge <= 50 && (Time.hour() % 4)) {      // If the battery level is <50%, only connect every fourth hour
+          Log.info("Connecting but <50%% charge - four hour schedule"); 
+          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here                                             
+          break; 
+        }                                                              // Leave this state and go connect - will return only if we are successful in connecting
+        else if (sysStatus.stateOfCharge <= 65 && (Time.hour() % 2)) { // If the battery level is 50% -  65%, only connect every other hour
+          Log.info("Connecting but 50-65%% charge - two hour schedule"); 
           state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here                                             
           break;                                                       // Leave this state and go connect - will return only if we are successful in connecting
         }
