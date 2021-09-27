@@ -73,12 +73,14 @@
 //v28.00 - Recompiled for deviceOS@2.2.0 - should bring better results for long connection times
 //v29.00 - Adding a new state for receiving a firmware update - this state delays napping / sleeping to receive the update 
 //v30.00 - Same as v29 but compiled for deviceOS@2.2.0 - Keeps the firmware update state but with less debug messaging.  One change - goes to reporting only every 2 hours at 65% and 4 hours less than 50%
+//v31.00 - Added a bounds check on the lastConnectionDuration
+//v32.00 - Moved to System for battery charge and will explicitly enable updates at the new day
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(30);
+PRODUCT_VERSION(32);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="30.00";
+char currentPointRelease[6] ="32.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -132,8 +134,7 @@ SYSTEM_THREAD(ENABLED);                             // Means my code will not be
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 SystemSleepConfiguration config;                    // Initialize new Sleep 2.0 Api
 MB85RC64 fram(Wire, 0);                             // Rickkas' FRAM library
-AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog library
-FuelGauge fuel;                                     // Enable the fuel gauge API     
+AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog library  
 
 // For monitoring / debugging, you can uncomment the next line
 SerialLogHandler logHandler(LOG_LEVEL_ALL);
@@ -340,20 +341,19 @@ void setup()                                        // Note: Disconnected Setup(
 void loop()
 {
   switch(state) {
-  case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
+  case IDLE_STATE:                                                     // Where we spend most time - note, the order of these conditionals is important
     if (state != oldState) publishStateTransition();
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;         // When in low power mode, we can nap between taps
-    if (firmwareUpdateInProgress) state= FIRMWARE_UPDATE;             // This means there is a firemware update on deck
+    if (firmwareUpdateInProgress) state= FIRMWARE_UPDATE;                                                     // This means there is a firemware update on deck
     if (Time.hour() != Time.hour(lastReportedTime)) state = REPORTING_STATE;                                  // We want to report on the hour but not after bedtime
     if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
-
     break;
 
-  case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
+  case SLEEPING_STATE: {                                               // This state is triggered once the park closes and runs until it opens
     if (state != oldState) publishStateTransition();
-    detachInterrupt(intPin);                                          // Done sensing for the day
-    sensorControl(false);                                             // Turn off the sensor module for the hour
-    if (current.hourlyCount) {                                        // If this number is not zero then we need to send this last count
+    detachInterrupt(intPin);                                           // Done sensing for the day
+    sensorControl(false);                                              // Turn off the sensor module for the hour
+    if (current.hourlyCount) {                                         // If this number is not zero then we need to send this last count
       state = REPORTING_STATE;
       break;
     }
@@ -367,9 +367,11 @@ void loop()
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep device continues operations from here
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
-      setLowPowerMode("0");
-      sysStatus.openTime = 0;                                          // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
-      sysStatus.closeTime = 24;
+      setLowPowerMode("0");                                            // We are waking the device for a reaon
+      if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) {
+        sysStatus.openTime = 0;                                        // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
+        sysStatus.closeTime = 24;                                      // This only resets if the device beleives it is off-hours
+      }
     }
     if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
       sensorControl(true);                                             // Turn off the sensor module for the hour
@@ -454,13 +456,13 @@ void loop()
       else state = IDLE_STATE;
     }
     else if (sysStatus.lastConnectionDuration > connectMaxTimeSec) {
-      current.alerts = 2;
+      current.alerts = 2;                                              // Connection timed out alert
       sysStatus.connectedStatus = false;
       recordConnectionDetails();                                       // Record outcome of connection attempt
       Log.info("cloud connection unsuccessful");
       disconnectFromParticle();                                        // Make sure the modem is turned off
-      if (sysStatus.solarPowerMode) setLowPowerMode("1");              // If we cannot connect, there is no point to staing out of low power mode
-      if ((Time.now() - sysStatus.lastConnection) > 3 * 3600L) {       // Only sends to ERROR_STATE if it has been over three hours - this ties to reporting
+      if (sysStatus.solarPowerMode) setLowPowerMode("1");              // If we cannot connect, there is no point to stayng out of low power mode
+      if ((Time.now() - sysStatus.lastConnection) > 3 * 3600L) {       // Only sends to ERROR_STATE if it has been over three hours - this ties to reporting and low battery state
         state = ERROR_STATE;     
         resetTimeStamp = millis();
         break;
@@ -631,7 +633,9 @@ void sensorControl(bool enableSensor) {                                // What i
 void  recordConnectionDetails()  {                                     // Whether the connection was successful or not, we will collect and publish metrics
   char connectionStr[32];
 
-  if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
+  if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = 0;
+  else if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
+
   snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
   Log.info(connectionStr);
   if (sysStatus.verboseMode && sysStatus.connectedStatus) {            // If we connected, let's publish the connection time
@@ -790,20 +794,23 @@ void takeMeasurements()
 
   isItSafeToCharge();                                                  // See if it is safe to charge
 
-  // This section is a fix for a problem that I hope gets fixed in a future deviceOS update - Inaccurate state of charge when measring after sleep
-  fuel.wakeup();                                                       //wake up the Fuel Gauge chip
-  delay(500);                                                          // https://community.particle.io/t/sleepy-boron-soc-not-updating/55086/37
-  sysStatus.stateOfCharge = int(fuel.getSoC());                        // Assign to system value
+  sysStatus.stateOfCharge = int(System.batteryCharge());               // Assign to system value
 
   if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
     System.setPowerConfiguration(SystemPowerConfiguration());          // Reset the PMIC
   }
   if (sysStatus.stateOfCharge < current.minBatteryLevel) current.minBatteryLevel = sysStatus.stateOfCharge; // Keep track of lowest value for the day
+  
   if (sysStatus.stateOfCharge < 30) {
     sysStatus.lowBatteryMode = true;                                   // Check to see if we are in low battery territory
-    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...                               
+    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...      
+    Log.info("Low Battery Mode Activated");                        
   }
-  else sysStatus.lowBatteryMode = false;                               // We have sufficient to continue operations
+  else {
+    sysStatus.lowBatteryMode = false;                               // We have sufficient to continue operations
+    Log.info("Low Battery Mode Cleared");                        
+  }
+  
   systemStatusWriteNeeded = true;
   currentCountsWriteNeeded = true;
 }
@@ -969,7 +976,7 @@ void checkSystemValues() {                                          // Checks to
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
-  if (sysStatus.lastConnectionDuration < 0 || sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = 0;
+  if (sysStatus.lastConnectionDuration > connectMaxTimeSec) sysStatus.lastConnectionDuration = 0;
 
   if (current.maxConnectTime > connectMaxTimeSec) {
     current.maxConnectTime = 0;
@@ -1079,6 +1086,7 @@ void resetEverything() {                                              // The dev
   current.maxConnectTime = 0;                                         // Reset values for this time period
   current.minBatteryLevel = 100;
   currentCountsWriteNeeded = true;
+  if (current.updateAttempts >=3) System.enableUpdates();
   current.updateAttempts = 0;                                         // Reset the update attempts counter for the day
   currentCountsWriteNeeded=true;                                      // Make sure that the values are updated in FRAM
 }
