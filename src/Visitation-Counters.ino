@@ -75,12 +75,13 @@
 //v30.00 - Same as v29 but compiled for deviceOS@2.2.0 - Keeps the firmware update state but with less debug messaging.  One change - goes to reporting only every 2 hours at 65% and 4 hours less than 50%
 //v31.00 - Added a bounds check on the lastConnectionDuration
 //v32.00 - Explicitly enable updates at the new day, Battery sense in low power, Connection time logic to millis, check for Cellular off for napping and sleep, check for lost connection and add connection limits, 96 messages in POSIX queue
+//v33.00 - Minor, removed battery SoC and VCell messaging to save data costs, improved reporting on update status
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(32);
+PRODUCT_VERSION(33);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="32.15";
+char currentPointRelease[6] ="33.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -288,8 +289,11 @@ void setup()                                        // Note: Disconnected Setup(
   checkSystemValues();                                                 // Make sure System values are all in valid range
 
   if (current.updateAttempts >= 3) {
+    char data[64];
     System.disableUpdates();                                           // We will only try to update three times in a day 
     current.alerts = 7;                                                // Set an alert that we have maxed out our updates for the day
+    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+    PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
   }
 
   // Next we set the timezone and check is we are in daylight savings time
@@ -485,7 +489,6 @@ void loop()
     takeMeasurements();                                               // Take Measurements here for reporting
     if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
     sendEvent();                                                      // Publish hourly but not at opening time as there is nothing to publish
-    current.alerts = 0;                                               // Reset Alert after each reporting event
     state = CONNECTING_STATE;                                         // We are only passing through this state once each hour    
 
     break;
@@ -569,7 +572,6 @@ void loop()
           snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
           PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
           current.updateAttempts++;                                    // Increment the update attempt counter
-          current.alerts = 0;                                          // Reset the alert after publish
           state = IDLE_STATE;
       }
     } break;
@@ -778,12 +780,11 @@ void firmwareUpdateHandler(system_event_t event, int param) {
       firmwareUpdateInProgress = true;
       break;
     case firmware_update_complete:
-      firmwareUpdateInProgress = true;
+      firmwareUpdateInProgress = false;
       current.alerts = 4;                                              // Record a successful attempt
       snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
       PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
       current.updateAttempts = 0;                                      // Zero the update attempts counter
-      current.alerts = 0;                                              // Reset the alert after publish
       break;
     case firmware_update_failed:
       firmwareUpdateInProgress = false;
@@ -791,7 +792,6 @@ void firmwareUpdateHandler(system_event_t event, int param) {
       snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
       PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publlish queue
       current.updateAttempts++;                                        // Increment the update attempts counter
-      current.alerts = 0;                                              // Reset the alert after publish
       break;
   }
   currentCountsWriteNeeded = true;
@@ -800,12 +800,10 @@ void firmwareUpdateHandler(system_event_t event, int param) {
 // These are the functions that are part of the takeMeasurements call
 void takeMeasurements()
 {
-  char data[64];
   if (Cellular.ready()) getSignalStrength();                           // Test signal strength if the cellular modem is on and ready
 
   getTemperature();                                                    // Get Temperature at startup as well
   
-  // Battery Related actions
   sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
 
   isItSafeToCharge();                                                  // See if it is safe to charge
@@ -821,22 +819,19 @@ void takeMeasurements()
   if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
     System.setPowerConfiguration(SystemPowerConfiguration());          // Reset the PMIC
   }
-  if (sysStatus.stateOfCharge < current.minBatteryLevel) current.minBatteryLevel = sysStatus.stateOfCharge; // Keep track of lowest value for the day
+
+  if (sysStatus.stateOfCharge < current.minBatteryLevel) {
+    current.minBatteryLevel = sysStatus.stateOfCharge;                 // Keep track of lowest value for the day
+    currentCountsWriteNeeded = true;
+  }
   
   if (sysStatus.stateOfCharge < 30) {
     sysStatus.lowBatteryMode = true;                                   // Check to see if we are in low battery territory
-    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...      
-    snprintf(data, sizeof(data), "Low Battery Mode SoC: %4.2f, vCell: %4.2f", fuelGauge.getSoC(),fuelGauge.getVCell());
-    if (Particle.connected() && sysStatus.verboseMode) Particle.publish("Diagnostic", data, PRIVATE);             
+    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...              
   }
-  else {
-    sysStatus.lowBatteryMode = false;                                  // We have sufficient to continue operations
-    snprintf(data, sizeof(data), "Normal Operations SoC: %4.2f, vCell: %4.2f", fuelGauge.getSoC(),fuelGauge.getVCell());
-    if (Particle.connected()) Particle.publish("Diagnostic", data, PRIVATE);                            
-  }
+  else sysStatus.lowBatteryMode = false;                               // We have sufficient to continue operations                          
 
   systemStatusWriteNeeded = true;
-  currentCountsWriteNeeded = true;
 }
 
 bool isItSafeToCharge()                                                // Returns a true or false if the battery is in a safe charging range.  
@@ -850,6 +845,7 @@ bool isItSafeToCharge()                                                // Return
   }
   else {
     pmic.enableCharging();                                             // It is safe to charge the battery
+    if (current.alerts == 1) current.alerts = 0;                       // Reset the alerts flag if we previously had disabled charging
     return true;
   }
 }
@@ -1104,13 +1100,19 @@ int sendNow(String command) // Function to force sending data in current hour
  * @details Once run, it will reset all daily-specific counts and trigger an update in FRAM.
  */
 void resetEverything() {                                              // The device is waking up in a new day or is a new install
+  char data[64];
   current.dailyCount = 0;                                             // Reset the counts in FRAM as well
   current.hourlyCount = 0;
   current.lastCountTime = Time.now();                                 // Set the time context to the new day
   current.maxConnectTime = 0;                                         // Reset values for this time period
   current.minBatteryLevel = 100;
   currentCountsWriteNeeded = true;
-  if (current.updateAttempts >=3) System.enableUpdates();
+  if (current.alerts ==7 || current.updateAttempts >=3) {             // We had tried to update enough times that we disabled updates for the day - resetting
+    System.enableUpdates();
+    current.alerts = 0;   
+    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+    PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
+  }
   current.updateAttempts = 0;                                         // Reset the update attempts counter for the day
   currentCountsWriteNeeded=true;                                      // Make sure that the values are updated in FRAM
 }
