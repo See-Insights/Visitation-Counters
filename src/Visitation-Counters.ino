@@ -77,12 +77,14 @@
 //v32.00 - Explicitly enable updates at the new day, Battery sense in low power, Connection time logic to millis, check for Cellular off for napping and sleep, check for lost connection and add connection limits, 96 messages in POSIX queue
 //v33.00 - Minor, removed battery SoC and VCell messaging to save data costs, improved reporting on update status
 //v34.00 - Recompiled for deviceOS@2.0.1 for low-bandwidth devices.  Cellular.isOFf is commented out in disconnectFromParticle()
+//v34.01 - Need some additional delay for Cellular Off since we don't have  - backed off v34 - back to v31
+//v33.01 - Moved back to deviceOS@2.2.0 - baseline for moving forward.
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(34);
+PRODUCT_VERSION(33);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="34.00";
+char currentPointRelease[6] ="33.01";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -364,7 +366,7 @@ void loop()
       state = REPORTING_STATE;
       break;
     }
-    //if (sysStatus.connectedStatus || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle
+    if (sysStatus.connectedStatus || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle
     if (sysStatus.connectedStatus) disconnectFromParticle();           // Disconnect cleanly from Particle
     state = IDLE_STATE;                                                // Head back to the idle state to see what to do next
     ab1805.stopWDT();                                                  // No watchdogs interrupting our slumber
@@ -393,7 +395,7 @@ void loop()
   case NAPPING_STATE: {                                                // This state puts the device in low power mode quickly
     if (state != oldState) publishStateTransition();
     if (sensorDetect || countSignalTimer.isActive())  break;           // Don't nap until we are done with event
-  //  if (sysStatus.connectedStatus || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle
+    if (sysStatus.connectedStatus || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle
     if (sysStatus.connectedStatus) disconnectFromParticle();           // Disconnect cleanly from Particle
     stayAwake = 1000;                                                  // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour
     state = IDLE_STATE;                                                // Back to the IDLE_STATE after a nap - not enabling updates here as napping is typicallly disconnected
@@ -1052,7 +1054,7 @@ bool disconnectFromParticle()                                          // Ensure
   waitForNot(Particle.connected, 15000);                               // make sure before turning off the cellular modem
   Cellular.disconnect();                                               // Disconnect from the cellular network
   Cellular.off();                                                      // Turn off the cellular modem
-  // waitFor(Cellular.isOff, 30000);                                      // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
+  waitFor(Cellular.isOff, 30000);                                      // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
   sysStatus.connectedStatus = false;
   systemStatusWriteNeeded = true;
   detachInterrupt(userSwitch);                                         // Stop watching the userSwitch as we will no longer be connected
