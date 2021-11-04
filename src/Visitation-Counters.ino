@@ -13,7 +13,7 @@
 /* Alert Count Definitions
 * 0 = Normal Operations - No Alert
 * 1 = Battery temp too high / low to charge
-* 2 = Failed to connect to Particle 
+* 2 = Failed to connect to Particle
 * 3 = Failed to get Webhook response when connected
 * 4 = Firmware update completed
 * 5 = Firmware update timed out
@@ -22,14 +22,14 @@
 */
 
 //v1 - Adapted from the Boron Connected Counter Code at release v10
-//v2 - Made some significant improvements: temp dependent charging, avoiding use of "enable" sleep, better battery "context" - 
+//v2 - Made some significant improvements: temp dependent charging, avoiding use of "enable" sleep, better battery "context" -
 //V3 - defaults to trail counters
 //v4 - defaults to car counters - norm going forward - note this is only applied with a new device
 //v4.02 - Added watchdog petting to connecttoparticle and got rid of srtcpy
 //v4.03 - Added and out of memory reset into the main loop as recommended in AN023 above
 //v5.00 - Updated and deployed to the Particle product group
 //v6.00 - Update to support 24 hour operation / took out a default setting for sensor type / Added some DOXYGEN comments / Fixed sysStatus object / Added connection reporting and reset logic
-//v7.00 - Fix for "white light bug".  
+//v7.00 - Fix for "white light bug".
 //v8.00 - Simpler setup() and new state for connecting to particle cloud, reporting connection duration in webhook
 //v9.00 - Testing some new features; 1) No ProductID!  2) bounds check on connect time, 3) Function to support seeding a daily value 4) Deleted unused "reset FRAM" function
 //v9.01 - Updated .gitignore, removed lastConnectDuration unneeded tests
@@ -59,19 +59,19 @@
 //v18.00 - Updated Full modem Reset
 //v19.00 - Recompiled for deviceOS@2.0.1 so we could update low-bandwidth devices.  Had to comment out the Cellular.isOff() in two places.  Need to add an update handler
 //v20.00 - For the Wake County counters and new default going forward standard day is 6am to 10pm.  This update will force the 10pm close and this will be removed for future releases keeping the "system defaults to 10pm"
-//v21.00 - Major Update - 1) Queueing only Webhooks, 2) New PublishSyncPOSIX, 3) No more "in flight" counts 4) Enforce low battery limits 
+//v21.00 - Major Update - 1) Queueing only Webhooks, 2) New PublishSyncPOSIX, 3) No more "in flight" counts 4) Enforce low battery limits
 //v21.01 - Fixed error that slowed device going to sleep.
 //v21.02 - Removed conditional connection code used for testing and added logic to report every other hour when capacity is less than 65%
 //v21.03 - Fixed but that caused multiple reports when the battery is low
 //v21.04 - Found an issue that lost the current daily count
 //v22.00 - Fixed an issue in the structure of the current counts srray that caused a loss of daily count data.  Changed the way that Alerts are coded: (1 - too hot or cold, 2 - timed out connection, 3 - timed out webhook)
 //v23.00 - Changed behaviour to sent first puslish at open to set zero counts, removed the WITH_ACK for all but Error messages
-//v24.00 - Changed the program flow so Connecting state always returns to IDLE state.  Reporting works with or without connecting.  
+//v24.00 - Changed the program flow so Connecting state always returns to IDLE state.  Reporting works with or without connecting.
 //v25.00 - Fixed issue where not low power device looses connection to Particle cloud - also turns off cell radio after time out connecting
 //v26.00 - Simplified ERROR state, got rid of FullModemReset and cleaned up little nits to shorted code.  Added Real-Time Audit feature.
 //v27.00 - Updated color for testing to "Blue-Red" and streamlined the Connecting state flow.  Also, time wake sends to IDLE not CONNECTING and Failure to connect moves to LowPowerMode in Solar devices, reset clears verbose counting
 //v28.00 - Recompiled for deviceOS@2.2.0 - should bring better results for long connection times
-//v29.00 - Adding a new state for receiving a firmware update - this state delays napping / sleeping to receive the update 
+//v29.00 - Adding a new state for receiving a firmware update - this state delays napping / sleeping to receive the update
 //v30.00 - Same as v29 but compiled for deviceOS@2.2.0 - Keeps the firmware update state but with less debug messaging.  One change - goes to reporting only every 2 hours at 65% and 4 hours less than 50%
 //v31.00 - Added a bounds check on the lastConnectionDuration
 //v32.00 - Explicitly enable updates at the new day, Battery sense in low power, Connection time logic to millis, check for Cellular off for napping and sleep, check for lost connection and add connection limits, 96 messages in POSIX queue
@@ -79,12 +79,16 @@
 //v34.00 - Recompiled for deviceOS@2.0.1 for low-bandwidth devices.  Cellular.isOFf is commented out in disconnectFromParticle()
 //v34.01 - Need some additional delay for Cellular Off since we don't have  - backed off v34 - back to v31
 //v33.01 - Moved back to deviceOS@2.2.0 - baseline for moving forward.
+//v33.03 - Minor updates - System.on collected, Solar panel current limits adjusted, messages after load defaults, String message fix
+//v33.04 - Removed current limits from 33.03
+//v35.00 - Fixed issue with the PublishQueuePosix that could cause lockups, Fixed DST calculation for 2021 when DST changes on November 7th, fixed issue with sleeping too fast
+//v36.00 - Fix for location of queue and better handling for connection issues
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(33);
+PRODUCT_VERSION(36);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="33.01";
+char currentPointRelease[6] ="36.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -138,16 +142,11 @@ SYSTEM_THREAD(ENABLED);                             // Means my code will not be
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 SystemSleepConfiguration config;                    // Initialize new Sleep 2.0 Api
 MB85RC64 fram(Wire, 0);                             // Rickkas' FRAM library
-AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog library  
+AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog library
 FuelGauge fuelGauge;                                // Needed to address issue with updates in low battery state
 
 // For monitoring / debugging, you can uncomment the next line
 SerialLogHandler logHandler(LOG_LEVEL_ALL);
-/*
-SerialLogHandler logHandler(115200, LOG_LEVEL_INFO, {
-    { "ncp.at", LOG_LEVEL_TRACE },
-});
-*/
 
 // State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE, FIRMWARE_UPDATE};
@@ -177,7 +176,9 @@ const unsigned long resetWait = 30000;              // How long will we wait in 
 unsigned long stayAwakeTimeStamp = 0;               // Timestamps for our timing variables..
 unsigned long stayAwake;                            // Stores the time we need to wait before napping
 unsigned long resetTimeStamp = 0;                   // Resets - this keeps you from falling into a reset loop
+char currentOffsetStr[10];                          // What is our offset from UTC
 unsigned long lastReportedTime = 0;                 // Need to keep this separate from time so we know when to report
+char wateringThresholdPctStr[8];
 unsigned long connectionStartTime;
 
 
@@ -191,7 +192,6 @@ char lowPowerModeStr[16];                           // In low power mode?
 char openTimeStr[8]="NA";                           // Park Open Time
 char closeTimeStr[8]="NA";                          // Park close Time
 char sensorTypeConfigStr[16];
-char currentOffsetStr[10];                          // What is our offset from UTC
 bool systemStatusWriteNeeded = false;               // Keep track of when we need to write
 bool currentCountsWriteNeeded = false;
 
@@ -212,12 +212,12 @@ void setup()                                        // Note: Disconnected Setup(
   pinMode(wakeUpPin,INPUT);                         // This pin is active HIGH
   pinMode(userSwitch,INPUT);                        // Momentary contact button on board for direct user input
   pinMode(blueLED, OUTPUT);                         // declare the Blue LED Pin as an output
-  
+
   // Pressure / PIR Module Pin Setup
   pinMode(intPin,INPUT_PULLDOWN);                   // pressure sensor interrupt
   pinMode(disableModule,OUTPUT);                    // Disables the module when pulled high
   pinMode(ledPower,OUTPUT);                         // Turn on the lights
-  
+
   digitalWrite(blueLED,HIGH);                       // Turn on the led so we can see how long the Setup() takes
 
   char responseTopic[125];
@@ -225,6 +225,8 @@ void setup()                                        // Note: Disconnected Setup(
   deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
   System.on(firmware_update, firmwareUpdateHandler);// Registers a handler that will track if we are getting an update
+  System.on(out_of_memory, outOfMemoryHandler);                        // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
+
 
   Particle.variable("HourlyCount", current.hourlyCount);                // Define my Particle variables
   Particle.variable("DailyCount", current.dailyCount);                  // Note: Don't have to be connected for any of this!!!
@@ -260,9 +262,7 @@ void setup()                                        // Note: Disconnected Setup(
 
   ab1805.withFOUT(D8).setup();                                         // The carrier board has D8 connected to FOUT for wake interrupts
   ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                         // Enable watchdog
-  
-  System.on(out_of_memory, outOfMemoryHandler);                        // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
-  
+
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
   }
@@ -270,7 +270,6 @@ void setup()                                        // Note: Disconnected Setup(
   fuelGauge.wakeup();                                                  // Expliciely wake the Feul gauge and give it a half-sec
   delay(500);
   fuelGauge.quickStart();                                              // May help us re-establish a baseline for SoC
-
 
   // Next we will load FRAM and check or reset variables to their correct values
   fram.begin();                                                        // Initialize the FRAM module
@@ -291,9 +290,13 @@ void setup()                                        // Note: Disconnected Setup(
 
   checkSystemValues();                                                 // Make sure System values are all in valid range
 
+  // Publish Queue Posix is used exclusively for sending webhooks and update alerts in order to conserve RAM and reduce writes / wear
+  PublishQueuePosix::instance().setup();                               // Start the Publish Queie
+  // PublishQueuePosix::instance().withDirPath("/usr/myqueue");           // Set the directory for the queue
+
   if (current.updateAttempts >= 3) {
     char data[64];
-    System.disableUpdates();                                           // We will only try to update three times in a day 
+    System.disableUpdates();                                           // We will only try to update three times in a day
     current.alerts = 7;                                                // Set an alert that we have maxed out our updates for the day
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
     PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
@@ -304,13 +307,9 @@ void setup()                                        // Note: Disconnected Setup(
   DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
   Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
-  
-  // Publish Queue Posix is used exclusively for sending webhooks in order to conserve RAM and reduce writes / wear
-  PublishQueuePosix::instance().setup();                               // Tend to the queue
-  PublishQueuePosix::instance().withRamQueueSize(0);                   // Writes to memory immediately
-  PublishQueuePosix::instance().withFileQueueSize(96);                 // This should last at least two days
 
-  // Make up the strings to make console values easier to read
+  if (!digitalRead(userSwitch)) loadSystemDefaults();                  // Make sure the device wakes up and connects - reset to defaults and exit low power mode
+
   makeUpStringMessages();                                              // Updated system settings - refresh the string messages
 
   setPowerConfig();                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
@@ -319,10 +318,8 @@ void setup()                                        // Note: Disconnected Setup(
   if (current.hourlyCount) lastReportedTime = current.lastCountTime;
   else lastReportedTime = Time.now();                                  // Initialize it to now so that reporting can begin as soon as the hour changes
 
-  if (!digitalRead(userSwitch)) loadSystemDefaults();                  // Make sure the device wakes up and connects - reset to defaults and exit low power mode
-
   // Here is where the code diverges based on why we are running Setup()
-  // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over  
+  // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
   if (Time.day() != Time.day(current.lastCountTime)) {                 // Check to see if the device was last on in a different day
     resetEverything();                                                 // Zero the counts for the new day
   }
@@ -332,7 +329,7 @@ void setup()                                        // Note: Disconnected Setup(
   if (sysStatus.lowBatteryMode) setLowPowerMode("1");                  // If battery is low we need to go to low power state
   if (sysStatus.verboseCounts) verboseCountsHandler();                 // If in verbose counts mode before, reset will clear it
 
-  if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) { // Park is open let's get ready for the day                                                            
+  if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) { // Park is open let's get ready for the day
     sensorControl(true);                                               // Turn on the sensor
     attachInterrupt(intPin, sensorISR, RISING);                        // Pressure Sensor interrupt from low to high
     stayAwake = stayAwakeLong;                                         // Keeps Boron awake after reboot - helps with recovery
@@ -341,7 +338,7 @@ void setup()                                        // Note: Disconnected Setup(
   if (state == INITIALIZATION_STATE) state = IDLE_STATE;               // IDLE unless otherwise from above code
 
   systemStatusWriteNeeded = true;                                      // Update FRAM with any changes from setup
-  
+
   Log.info("Startup complete");
   digitalWrite(blueLED,LOW);                                           // Signal the end of startup
 }
@@ -378,11 +375,17 @@ void loop()
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     fuelGauge.wakeup();                                                // Make sure the fuelGauge is woke
     if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
-      setLowPowerMode("0");                                            // We are waking the device for a reaon
-      if ((Time.hour() >= sysStatus.openTime) && (Time.hour() < sysStatus.closeTime)) {
+    delay(2000);
+      setLowPowerMode("0");                                            // We are waking the device for a reason
+      if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) {   // If this is sleepy time, then we need to change settings so device stays awake
+      Log.info("Resetting opening hours");
         sysStatus.openTime = 0;                                        // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
         sysStatus.closeTime = 24;                                      // This only resets if the device beleives it is off-hours
+        systemStatusWriteNeeded = true;
       }
+      stayAwakeTimeStamp = millis();
+
+      stayAwake = stayAwakeLong;
     }
     if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
       sensorControl(true);                                             // Turn off the sensor module for the hour
@@ -441,13 +444,13 @@ void loop()
       // If we are in low power mode, we may bail if battery is too low and we need to reduce reporting frequency
       if (sysStatus.lowPowerMode && digitalRead(userSwitch)) {         // Low power mode and user switch not pressed
         if (sysStatus.stateOfCharge <= 50 && (Time.hour() % 4)) {      // If the battery level is <50%, only connect every fourth hour
-          Log.info("Connecting but <50%% charge - four hour schedule"); 
-          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here                                             
-          break; 
+          Log.info("Connecting but <50%% charge - four hour schedule");
+          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here
+          break;
         }                                                              // Leave this state and go connect - will return only if we are successful in connecting
         else if (sysStatus.stateOfCharge <= 65 && (Time.hour() % 2)) { // If the battery level is 50% -  65%, only connect every other hour
-          Log.info("Connecting but 50-65%% charge - two hour schedule"); 
-          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here                                             
+          Log.info("Connecting but 50-65%% charge - two hour schedule");
+          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here
           break;                                                       // Leave this state and go connect - will return only if we are successful in connecting
         }
       }
@@ -479,12 +482,12 @@ void loop()
       disconnectFromParticle();                                        // Make sure the modem is turned off
       if (sysStatus.solarPowerMode) setLowPowerMode("1");              // If we cannot connect, there is no point to stayng out of low power mode
       if ((Time.now() - sysStatus.lastConnection) > 3 * 3600L) {       // Only sends to ERROR_STATE if it has been over three hours - this ties to reporting and low battery state
-        state = ERROR_STATE;     
+        state = ERROR_STATE;
         resetTimeStamp = millis();
         break;
       }
       else state = IDLE_STATE;
-    } 
+    }
   } break;
 
   case REPORTING_STATE:
@@ -494,7 +497,7 @@ void loop()
     takeMeasurements();                                               // Take Measurements here for reporting
     if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
     sendEvent();                                                      // Publish hourly but not at opening time as there is nothing to publish
-    state = CONNECTING_STATE;                                         // We are only passing through this state once each hour    
+    state = CONNECTING_STATE;                                         // We are only passing through this state once each hour
 
     break;
 
@@ -547,7 +550,7 @@ void loop()
           waitUntil(meterParticlePublish);
           Particle.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);            // Brodcast Reset Action
         }
-        delay(2000);  
+        delay(2000);
         disconnectFromParticle();                                      // Make sure we shut down connections gracefully
         sysStatus.resetCount = 0;                                      // Zero the ResetCount
         fram.put(FRAM::systemStatusAddr,sysStatus);                    // Won't get back to the main loop
@@ -566,7 +569,7 @@ void loop()
         Log.info("In the firmware update state");
         publishStateTransition();
       }
-      if (!firmwareUpdateInProgress) {                                 // Done with the update 
+      if (!firmwareUpdateInProgress) {                                 // Done with the update
           Log.info("firmware update completed");
           state = IDLE_STATE;
       }
@@ -584,7 +587,7 @@ void loop()
   // Take care of housekeeping items here
 
   if (sensorDetect) recordCount();                                     // The ISR had raised the sensor flag - this will service interrupts regardless of state
-  
+
   if (userSwitchDetect) verboseCountsHandler();                        // Will switch modes from verbose to not verbose counts based on current state
 
   ab1805.loop();                                                       // Keeps the RTC synchronized with the Boron's clock
@@ -613,7 +616,7 @@ void loop()
     System.reset();                                                    // An out of memory condition occurred - reset device.
   }
 
-  if (sysStatus.connectedStatus && !Particle.connected()) {            // If the system thinks we are connected, let's make sure that we are
+  if ((sysStatus.connectedStatus || !sysStatus.lowPowerMode) && !Particle.connected() && state != CONNECTING_STATE) {            // If the system thinks we are connected, let's make sure that we are
     state = CONNECTING_STATE;                                          // Go the connecting state - that way we will have limits on connection attempt duration
     sysStatus.connectedStatus = false;                                 // At least for now, this is the correct state value
     Log.info("Particle connection failed, reverting to the connecting state");
@@ -636,7 +639,7 @@ void sensorControl(bool enableSensor) {                                // What i
     }
   }
 
-  else { 
+  else {
     digitalWrite(disableModule,true);
 
     if (sysStatus.sensorType == 0) {                                   // This is the pressure sensor and we are enabling it
@@ -702,11 +705,11 @@ void recordCount() // This is where we check to see if an interrupt is set when 
 
 /**
  * @brief This functions sends the current data payload to Ubidots using a Webhook
- * 
+ *
  * @details This idea is that this is called regardless of connected status.  We want to send regardless and connect if we can later
  * The time stamp is the time of the last count or the beginning of the hour if there is a zero hourly count for that period
- * 
- * 
+ *
+ *
  */
 void sendEvent() {
   char data[256];                                                     // Store the date in this character array - not global
@@ -715,7 +718,7 @@ void sendEvent() {
     timeStampValue = current.lastCountTime;                           // If there was an event in the past hour, send the most recent event's timestamp
   }
   else {                                                              // If there were no events in the past hour/recording period, send the time when the last report was sent
-    timeStampValue = lastReportedTime;                                // This should be the beginning of the current hour 
+    timeStampValue = lastReportedTime;                                // This should be the beginning of the current hour
   }
   snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
   PublishQueuePosix::instance().publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
@@ -725,12 +728,12 @@ void sendEvent() {
 
 /**
  * @brief This function published system status information daily to a Google Sheet where I can monitor config / health for the fleet
- * 
- * @details These are values that don't need to be reported hourly and many have string values that Ubidots struggles with.  Testing this approach 
+ *
+ * @details These are values that don't need to be reported hourly and many have string values that Ubidots struggles with.  Testing this approach
  * to see if it can give me a more consistent view of fleet health and allow me to see device configuration when it is off-line
- * 
+ *
  * @link https://docs.particle.io/datasheets/app-notes/an011-publish-to-google-sheets/ @endlink
- * 
+ *
  */
 void publishToGoogleSheets() {
   char data[256];                                                     // Store the date in this character array - not global
@@ -768,19 +771,19 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
 
 /**
  * @brief The Firmware update handler tracks changes in the firmware update status
- * 
- * @details This handler is subscribed to in setup with System.on event and sets the firmwareUpdateinProgress flag that 
+ *
+ * @details This handler is subscribed to in setup with System.on event and sets the firmwareUpdateinProgress flag that
  * will trigger a state transition to the Firmware update state.  As some events are only see in this handler, failure
  * and success success codes are assigned here and the time out code in the main loop state.
- * 
- * @param event  - Firmware update 
+ *
+ * @param event  - Firmware update
  * @param param - Specific firmware update state
  */
 
 void firmwareUpdateHandler(system_event_t event, int param) {
   switch(param) {
     char data[64];                                                     // Store the date in this character array - not global
-      
+
     case firmware_update_begin:
       firmwareUpdateInProgress = true;
       break;
@@ -808,7 +811,7 @@ void takeMeasurements()
   if (Cellular.ready()) getSignalStrength();                           // Test signal strength if the cellular modem is on and ready
 
   getTemperature();                                                    // Get Temperature at startup as well
-  
+
   sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
 
   isItSafeToCharge();                                                  // See if it is safe to charge
@@ -829,19 +832,19 @@ void takeMeasurements()
     current.minBatteryLevel = sysStatus.stateOfCharge;                 // Keep track of lowest value for the day
     currentCountsWriteNeeded = true;
   }
-  
+
   if (sysStatus.stateOfCharge < 30) {
     sysStatus.lowBatteryMode = true;                                   // Check to see if we are in low battery territory
-    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...              
+    if (!sysStatus.lowPowerMode) setLowPowerMode("1");                 // Should be there already but just in case...
   }
-  else sysStatus.lowBatteryMode = false;                               // We have sufficient to continue operations                          
+  else sysStatus.lowBatteryMode = false;                               // We have sufficient to continue operations
 
   systemStatusWriteNeeded = true;
 }
 
-bool isItSafeToCharge()                                                // Returns a true or false if the battery is in a safe charging range.  
-{         
-  PMIC pmic(true);                                 
+bool isItSafeToCharge()                                                // Returns a true or false if the battery is in a safe charging range.
+{
+  PMIC pmic(true);
   if (current.temperature < 36 || current.temperature > 100 )  {       // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
     pmic.disableCharging();                                            // It is too cold or too hot to safely charge the battery
     sysStatus.batteryState = 1;                                        // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
@@ -937,26 +940,26 @@ void verboseCountsHandler() {
 // Power Management function
 int setPowerConfig() {
   SystemPowerConfiguration conf;
-  System.setPowerConfiguration(SystemPowerConfiguration());  // To restore the default configuration
+  System.setPowerConfiguration(SystemPowerConfiguration());            // To restore the default configuration
   if (sysStatus.solarPowerMode) {
-    conf.powerSourceMaxCurrent(900) // Set maximum current the power source can provide (applies only when powered through VIN)
-        .powerSourceMinVoltage(5080) // Set minimum voltage the power source can provide (applies only when powered through VIN)
-        .batteryChargeCurrent(1024) // Set battery charge current
-        .batteryChargeVoltage(4208) // Set battery termination voltage
-        .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST); // For the cases where the device is powered through VIN
-                                                                     // but the USB cable is connected to a USB host, this feature flag
-                                                                     // enforces the voltage/current limits specified in the configuration
-                                                                     // (where by default the device would be thinking that it's powered by the USB Host)
-    int res = System.setPowerConfiguration(conf); // returns SYSTEM_ERROR_NONE (0) in case of success
+    conf.powerSourceMaxCurrent(900)                                    // Set maximum current the power source can provide (applies only when powered through VIN)
+        .powerSourceMinVoltage(5080)                                   // Set minimum voltage the power source can provide (applies only when powered through VIN)
+        .batteryChargeCurrent(900)                                     // Set battery charge current
+        .batteryChargeVoltage(4208)                                    // Set battery termination voltage
+        .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST);  // For the cases where the device is powered through VIN
+                                                                       // but the USB cable is connected to a USB host, this feature flag
+                                                                       // enforces the voltage/current limits specified in the configuration
+                                                                       // (where by default the device would be thinking that it's powered by the USB Host)
+    int res = System.setPowerConfiguration(conf);                      // returns SYSTEM_ERROR_NONE (0) in case of success
     return res;
   }
   else  {
-    conf.powerSourceMaxCurrent(900)                                   // default is 900mA 
+    conf.powerSourceMaxCurrent(900)                                   // default is 900mA
         .powerSourceMinVoltage(4208)                                  // This is the default value for the Boron
         .batteryChargeCurrent(900)                                    // higher charge current from DC-IN when not solar powered
         .batteryChargeVoltage(4112)                                   // default is 4.112V termination voltage
         .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST) ;
-    int res = System.setPowerConfiguration(conf); // returns SYSTEM_ERROR_NONE (0) in case of success
+    int res = System.setPowerConfiguration(conf);                     // returns SYSTEM_ERROR_NONE (0) in case of success
     return res;
   }
 }
@@ -974,24 +977,24 @@ void loadSystemDefaults() {                                           // Default
   sysStatus.lowBatteryMode = false;
   if (digitalRead(userSwitch)) setLowPowerMode("1");                  // Low power mode or not depending on user switch
   else setLowPowerMode("0");
-  
+
   sysStatus.timezone = -5;                                            // Default is East Coast Time
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
   sysStatus.closeTime = 22;                                           // New standard with v20
-  sysStatus.solarPowerMode = true;  
+  sysStatus.solarPowerMode = true;
   sysStatus.lastConnectionDuration = 0;                               // New measure
   fram.put(FRAM::systemStatusAddr,sysStatus);                         // Write it now since this is a big deal and I don't want values over written
 }
 
  /**
   * @brief This function checks to make sure all values that we pull from FRAM are in bounds
-  * 
-  * @details As new devices are comissioned or the sysStatus structure is changed, we need to make sure that values are 
+  *
+  * @details As new devices are comissioned or the sysStatus structure is changed, we need to make sure that values are
   * in bounds so they do not cause unpredectable execution.
-  * 
+  *
   */
-void checkSystemValues() {                                          // Checks to ensure that all system values are in reasonable range 
+void checkSystemValues() {                                          // Checks to ensure that all system values are in reasonable range
   if (sysStatus.sensorType > 1) {                                   // Values are 0 for Pressure and 1 for PIR
     sysStatus.sensorType = 0;
     strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
@@ -1017,28 +1020,27 @@ void checkSystemValues() {                                          // Checks to
 
  /**
   * @brief Simple Function to construct the strings that make the console easier to read
-  * 
-  * @details Looks at all the system setting values and creates the appropriate strings.  Note that this 
+  *
+  * @details Looks at all the system setting values and creates the appropriate strings.  Note that this
   * is a little inefficient but it cleans up a fair bit of code.
-  * 
+  *
   */
 void makeUpStringMessages() {
-  // Special case for 24 hour operations
-  if (sysStatus.openTime == 0 && sysStatus.closeTime == 24) {
+
+  if (sysStatus.openTime == 0 && sysStatus.closeTime == 24) {                                 // Special case for 24 hour operations
     snprintf(openTimeStr, sizeof(openTimeStr), "NA");
     snprintf(closeTimeStr, sizeof(closeTimeStr), "NA");
-    return;
   }
-  // Open and Close Times
-  snprintf(openTimeStr, sizeof(openTimeStr), "%i:00", sysStatus.openTime);
-  snprintf(closeTimeStr, sizeof(closeTimeStr), "%i:00", sysStatus.closeTime);
+  else {
+    snprintf(openTimeStr, sizeof(openTimeStr), "%i:00", sysStatus.openTime);                  // Open and Close Times
+    snprintf(closeTimeStr, sizeof(closeTimeStr), "%i:00", sysStatus.closeTime);
+  }
 
-  // Low Power Mode String
-  if (sysStatus.lowPowerMode) strncpy(lowPowerModeStr,"Low Power", sizeof(lowPowerModeStr));
+  if (sysStatus.lowPowerMode) strncpy(lowPowerModeStr,"Low Power", sizeof(lowPowerModeStr));  // Low Power Mode Strings
   else strncpy(lowPowerModeStr,"Not Low Power", sizeof(lowPowerModeStr));
 
-  // Sensor string
-  if (sysStatus.sensorType == 0) strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));
+
+  if (sysStatus.sensorType == 0) strncpy(sensorTypeConfigStr,"Pressure Sensor",sizeof(sensorTypeConfigStr));  // Sensor strings
   else if (sysStatus.sensorType == 1) strncpy(sensorTypeConfigStr,"PIR Sensor",sizeof(sensorTypeConfigStr));
   else strncpy(sensorTypeConfigStr,"Unknown Sensor",sizeof(sensorTypeConfigStr));
 
@@ -1101,7 +1103,7 @@ int sendNow(String command) // Function to force sending data in current hour
 
 /**
  * @brief Resets all counts to start a new day.
- * 
+ *
  * @details Once run, it will reset all daily-specific counts and trigger an update in FRAM.
  */
 void resetEverything() {                                              // The device is waking up in a new day or is a new install
@@ -1114,7 +1116,7 @@ void resetEverything() {                                              // The dev
   currentCountsWriteNeeded = true;
   if (current.alerts ==7 || current.updateAttempts >=3) {             // We had tried to update enough times that we disabled updates for the day - resetting
     System.enableUpdates();
-    current.alerts = 0;   
+    current.alerts = 0;
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
     PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
   }
@@ -1145,12 +1147,12 @@ int setSolarMode(String command) // Function to force sending data in current ho
 
 /**
  * @brief Set the Sensor Type object
- * 
+ *
  * @details Over time, we may want to develop and deploy other sensot types.  The idea of this code is to allow us to select the sensor
  * we want via the console so all devices can run the same code.
- * 
+ *
  * @param command a string equal to "0" for pressure sensor and "1" for PIR sensor.  More sensor types possible in the future.
- * 
+ *
  * @return returns 1 if successful and 0 if not.
  */
 int setSensorType(String command)                                     // Function to force sending data in current hour
@@ -1161,7 +1163,7 @@ int setSensorType(String command)                                     // Functio
     strncpy(sensorTypeConfigStr,"Pressure Sensor", sizeof(sensorTypeConfigStr));
     systemStatusWriteNeeded=true;
     if (sysStatus.connectedStatus) Particle.publish("Mode","Set Sensor Mode to Pressure", PRIVATE);
-    
+
     return 1;
   }
   else if (command == "1")
@@ -1178,14 +1180,14 @@ int setSensorType(String command)                                     // Functio
 
 /**
  * @brief Turns on/off verbose mode.
- * 
+ *
  * @details Extracts the integer command. Turns on verbose mode if the command is "1" and turns
  * off verbose mode if the command is "0".
  *
  * @param command A string with the integer command indicating to turn on or off verbose mode.
  * Only values of "0" or "1" are accepted. Values outside this range will cause the function
  * to return 0 to indicate an invalid entry.
- * 
+ *
  * @return 1 if successful, 0 if invalid command
  */
 int setVerboseMode(String command) // Function to force sending data in current hour
@@ -1211,7 +1213,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
 
 /**
  * @brief Returns a string describing the battery state.
- * 
+ *
  * @return String describing battery state.
  */
 String batteryContextMessage() {
@@ -1220,13 +1222,13 @@ String batteryContextMessage() {
 
 /**
  * @brief Sets the closing time of the facility.
- * 
+ *
  * @details Extracts the integer from the string passed in, and sets the closing time of the facility
  * based on this input. Fails if the input is invalid.
  *
  * @param command A string indicating what the closing hour of the facility is in 24-hour time.
  * Inputs outside of "0" - "24" will cause the function to return 0 to indicate an invalid entry.
- * 
+ *
  * @return 1 if able to successfully take action, 0 if invalid command
  */
 int setOpenTime(String command)
@@ -1247,13 +1249,13 @@ int setOpenTime(String command)
 
 /**
  * @brief Sets the closing time of the facility.
- * 
+ *
  * @details Extracts the integer from the string passed in, and sets the closing time of the facility
  * based on this input. Fails if the input is invalid.
  *
  * @param command A string indicating what the closing hour of the facility is in 24-hour time.
  * Inputs outside of "0" - "24" will cause the function to return 0 to indicate an invalid entry.
- * 
+ *
  * @return 1 if able to successfully take action, 0 if invalid command
  */
 int setCloseTime(String command)
@@ -1272,16 +1274,16 @@ int setCloseTime(String command)
 
 /**
  * @brief Sets the daily count for the park - useful when you are replacing sensors.
- * 
+ *
  * @details Since the hourly counts are not retained after posting to Ubidots, seeding a value for
  * the daily counts will enable us to follow this process to replace an old counter: 1) Execute the "send now"
  * command on the old sensor.  Note the daily count.  2) Install the new sensor and perform tests to ensure
- * it is counting correclty.  3) Use this function to set the daily count to the right value and put the 
+ * it is counting correclty.  3) Use this function to set the daily count to the right value and put the
  * new device into operation.
  *
- * @param command A string for the new daily count.  
+ * @param command A string for the new daily count.
  * Inputs outside of "0" - "1000" will cause the function to return 0 to indicate an invalid entry.
- * 
+ *
  * @return 1 if able to successfully take action, 0 if invalid command
  */
 int setDailyCount(String command)
@@ -1300,14 +1302,14 @@ int setDailyCount(String command)
 
 /**
  * @brief Toggles the device into low power mode based on the input command.
- * 
+ *
  * @details If the command is "1", sets the device into low power mode. If the command is "0",
  * sets the device into normal mode. Fails if neither of these are the inputs.
  *
  * @param command A string indicating whether to set the device into low power mode or into normal mode.
  * A "1" indicates low power mode, a "0" indicates normal mode. Inputs that are neither of these commands
  * will cause the function to return 0 to indicate an invalid entry.
- * 
+ *
  * @return 1 if able to successfully take action, 0 if invalid command
  */
 int setLowPowerMode(String command)                                   // This is where we can put the device into low power mode if needed
@@ -1317,27 +1319,33 @@ int setLowPowerMode(String command)                                   // This is
   {
     sysStatus.lowPowerMode = true;
     makeUpStringMessages();                                           // Updated system settings - refresh the string messages
+    Log.info("Set Low Power Mode");
     if (sysStatus.connectedStatus) {
-      meterParticlePublish();
+      waitUntil(meterParticlePublish);
       Particle.publish("Mode",lowPowerModeStr, PRIVATE);
     }
   }
   else if (command == "0")                                            // Command calls for clearing lowPowerMode
   {
     sysStatus.lowPowerMode = false;
-    makeUpStringMessages();
+    makeUpStringMessages();                                           // Updated system settings - refresh the string messages
+    Log.info("Cleared Low Power Mode");
     if (!sysStatus.connectedStatus) {                                 // In case we are not connected, we will do so now.
       state = CONNECTING_STATE;                                       // Will connect - if connection fails, will need to reset device
     }
-    else Particle.publish("Mode",lowPowerModeStr, PRIVATE);
+    else {
+      waitUntil(meterParticlePublish);
+      Particle.publish("Mode",lowPowerModeStr, PRIVATE);
+    }
   }
   systemStatusWriteNeeded = true;
   return 1;
 }
 
+
 /**
  * @brief Publishes a state transition to the Log Handler and to the Particle monitoring system.
- * 
+ *
  * @details A good debugging tool.
  */
 void publishStateTransition(void)
@@ -1357,8 +1365,8 @@ void publishStateTransition(void)
 
 /**
  * @brief Cleanup function that is run at the beginning of the day.
- * 
- * @details May or may not be in connected state.  Syncs time with remote service and sets low power mode. 
+ *
+ * @details May or may not be in connected state.  Syncs time with remote service and sets low power mode.
  * Called from Reporting State ONLY. Cleans house at the beginning of a new day.
  */
 void dailyCleanup() {
