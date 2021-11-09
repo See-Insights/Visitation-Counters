@@ -83,12 +83,12 @@
 //v33.04 - Removed current limits from 33.03
 //v35.00 - Fixed issue with the PublishQueuePosix that could cause lockups, Fixed DST calculation for 2021 when DST changes on November 7th, fixed issue with sleeping too fast
 //v36.00 - Fix for location of queue and better handling for connection issues
+//v37.00 - Got rid of DSTRULES define - USA only for now
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(36);
-#define DSTRULES isDSTusa
-char currentPointRelease[6] ="36.00";
+PRODUCT_VERSION(37);
+char currentPointRelease[6] ="37.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -158,7 +158,7 @@ State oldState = INITIALIZATION_STATE;
 // Battery conect information - https://docs.particle.io/reference/device-os/firmware/boron/#batterystate-
 const char* batteryContext[7] = {"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Diconnected"};
 
-// Pin Constants - Boron Carrier Board v1.2a
+// Pin Constants - Boron Carrier Board v1.x
 const int tmp36Pin =      A4;                       // Simple Analog temperature sensor
 const int wakeUpPin =     D8;                       // This is the Particle Electron WKP pin
 const int blueLED =       D7;                       // This LED is on the Electron itself
@@ -178,7 +178,6 @@ unsigned long stayAwake;                            // Stores the time we need t
 unsigned long resetTimeStamp = 0;                   // Resets - this keeps you from falling into a reset loop
 char currentOffsetStr[10];                          // What is our offset from UTC
 unsigned long lastReportedTime = 0;                 // Need to keep this separate from time so we know when to report
-char wateringThresholdPctStr[8];
 unsigned long connectionStartTime;
 
 
@@ -226,7 +225,6 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
   System.on(firmware_update, firmwareUpdateHandler);// Registers a handler that will track if we are getting an update
   System.on(out_of_memory, outOfMemoryHandler);                        // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
-
 
   Particle.variable("HourlyCount", current.hourlyCount);                // Define my Particle variables
   Particle.variable("DailyCount", current.dailyCount);                  // Note: Don't have to be connected for any of this!!!
@@ -292,7 +290,6 @@ void setup()                                        // Note: Disconnected Setup(
 
   // Publish Queue Posix is used exclusively for sending webhooks and update alerts in order to conserve RAM and reduce writes / wear
   PublishQueuePosix::instance().setup();                               // Start the Publish Queie
-  // PublishQueuePosix::instance().withDirPath("/usr/myqueue");           // Set the directory for the queue
 
   if (current.updateAttempts >= 3) {
     char data[64];
@@ -304,7 +301,7 @@ void setup()                                        // Note: Disconnected Setup(
 
   // Next we set the timezone and check is we are in daylight savings time
   Time.setDSTOffset(sysStatus.dstOffset);                              // Set the value from FRAM if in limits
-  DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
+  isDSTusa() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
   Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
@@ -375,7 +372,6 @@ void loop()
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     fuelGauge.wakeup();                                                // Make sure the fuelGauge is woke
     if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
-    delay(2000);
       setLowPowerMode("0");                                            // We are waking the device for a reason
       if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) {   // If this is sleepy time, then we need to change settings so device stays awake
       Log.info("Resetting opening hours");
@@ -384,7 +380,6 @@ void loop()
         systemStatusWriteNeeded = true;
       }
       stayAwakeTimeStamp = millis();
-
       stayAwake = stayAwakeLong;
     }
     if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
@@ -492,24 +487,20 @@ void loop()
 
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
-
     lastReportedTime = Time.now();                                    // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
     takeMeasurements();                                               // Take Measurements here for reporting
     if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
     sendEvent();                                                      // Publish hourly but not at opening time as there is nothing to publish
     state = CONNECTING_STATE;                                         // We are only passing through this state once each hour
-
     break;
 
   case RESP_WAIT_STATE: {
     static unsigned long webhookTimeStamp = 0;                        // Webhook time stamp
-
     if (state != oldState) {
       webhookTimeStamp = millis();                                    // We are connected and we have published, head to the response wait state
       dataInFlight = true;                                            // set the data inflight flag
       publishStateTransition();
     }
-
     if (!dataInFlight)  {                                             // Response received --> back to IDLE state
       state = IDLE_STATE;
     }
@@ -520,7 +511,6 @@ void loop()
     }
     currentCountsWriteNeeded = true;
     systemStatusWriteNeeded = true;
-
   } break;
 
   case ERROR_STATE:                                                    // To be enhanced - where we deal with errors
@@ -1378,6 +1368,8 @@ void dailyCleanup() {
     waitFor(Particle.syncTimeDone,30000);                              // Wait for up to 30 seconds for the SyncTime to complete
   }
 
+  isDSTusa() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here - once a day
+  
   if (sysStatus.solarPowerMode || sysStatus.stateOfCharge <= 65) {     // If Solar or if the battery is being discharged
     setLowPowerMode("1");
   }
