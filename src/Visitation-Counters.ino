@@ -10,15 +10,21 @@
 *   This software will work with both pressure and PIR sensor counters
 */
 
-/* Alert Count Definitions
+/* Alert Code Definitions
 * 0 = Normal Operations - No Alert
-* 1 = Battery temp too high / low to charge
-* 2 = Failed to connect to Particle
-* 3 = Failed to get Webhook response when connected
-* 4 = Firmware update completed
-* 5 = Firmware update timed out
-* 6 = Firmware update failed
-* 7 = Update attempt limit reached - done for the day
+// device alerts
+* 10 = Battery temp too high / low to charge
+* 11 = PMIC Reset required
+// deviceOS or Firmware alerts
+* 20 = Firmware update completed
+* 21 = Firmware update timed out
+* 22 = Firmware update failed
+* 23 = Update attempt limit reached - done for the day
+// Connectivity alerts
+* 30 = Particle connection timed out but Cellular connection completed
+* 31 = Failed to connect to Particle or cellular
+// Particle cloud alerts
+* 40 = Failed to get Webhook response when connected
 */
 
 //v1 - Adapted from the Boron Connected Counter Code at release v10
@@ -83,13 +89,13 @@
 //v33.04 - Removed current limits from 33.03
 //v35.00 - Fixed issue with the PublishQueuePosix that could cause lockups, Fixed DST calculation for 2021 when DST changes on November 7th, fixed issue with sleeping too fast
 //v36.00 - Fix for location of queue and better handling for connection issues
-//v37.00 - Got rid of DSTRULES define - USA only for now, fixed issue with lowPowerMode loosing connection, fixed ternary
-//
+//v37.00 - Got rid of DSTRULES define - USA only for now, fixed issue with lowPowerMode loosing connection,
+//v37.02 - Fixed ternary in CONNECTING state and revamped alert codes
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(37);
-char currentPointRelease[6] ="37.01";
+char currentPointRelease[6] ="37.02";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -100,7 +106,6 @@ namespace FRAM {                                    // Moved to namespace instea
 };
 
 const int FRAMversionNumber = 3;                    // Increment this number each time the memory map is changed
-
 
 struct currentCounts_structure {                    // currently 10 bytes long
   int hourlyCount;                                  // In period hourly count
@@ -295,7 +300,7 @@ void setup()                                        // Note: Disconnected Setup(
   if (current.updateAttempts >= 3) {
     char data[64];
     System.disableUpdates();                                           // We will only try to update three times in a day
-    current.alerts = 7;                                                // Set an alert that we have maxed out our updates for the day
+    current.alerts = 23;                                                // Set an alert that we have maxed out our updates for the day
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
     PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
   }
@@ -463,12 +468,10 @@ void loop()
       stayAwake = stayAwakeLong;                                       // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
       recordConnectionDetails();                                       // Record outcome of connection attempt
-      Log.info("Cloud connection successful");
       attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable verbose counts
       (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
     }
     else if (sysStatus.lastConnectionDuration > connectMaxTimeSec) {
-      current.alerts = 2;                                              // Connection timed out alert
       recordConnectionDetails();                                       // Record outcome of connection attempt
       Log.info("cloud connection unsuccessful");
       disconnectFromParticle();                                        // Make sure the modem is turned off
@@ -503,7 +506,7 @@ void loop()
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       resetTimeStamp = millis();
-      current.alerts = 3;                                             // Raise the missed webhook flag
+      current.alerts = 40;                                            // Raise the missed webhook flag
       state = ERROR_STATE;                                            // Response timed out
     }
     currentCountsWriteNeeded = true;
@@ -563,7 +566,7 @@ void loop()
       else
       if (millis() - stateTime >= firmwareUpdateMaxTime.count()) {     // Ran out of time
           Log.info("firmware update timed out");
-          current.alerts = 5;                                          // Record alert for timeout
+          current.alerts = 21;                                          // Record alert for timeout
           snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
           PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
           current.updateAttempts++;                                    // Increment the update attempt counter
@@ -633,17 +636,33 @@ void sensorControl(bool enableSensor) {                                // What i
 }
 
 void  recordConnectionDetails()  {                                     // Whether the connection was successful or not, we will collect and publish metrics
-  char connectionStr[32];
+  char data[32];
 
   if (sysStatus.lastConnectionDuration > connectMaxTimeSec+1) sysStatus.lastConnectionDuration = 0;
   else if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
 
-  snprintf(connectionStr, sizeof(connectionStr),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
-  Log.info(connectionStr);
-  if (sysStatus.verboseMode && Particle.connected()) {            // If we connected, let's publish the connection time
-    waitUntil(meterParticlePublish);
-    Particle.publish("Cellular",connectionStr,PRIVATE);
+  if (Cellular.ready()) getSignalStrength();                           // Test signal strength if the cellular modem is on and ready
+
+  snprintf(data, sizeof(data),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
+  Log.info(data);
+
+  if (Particle.connected()) {
+    Log.info("Cloud connection successful");
+    Particle.publish("Cellular",data,PRIVATE);
   }
+  else if (Cellular.ready()) {                                        // We want to take note of this as it implies an issue with the Particle back-end
+    Log.info("Connected to cellular but not Particle");
+    current.alerts = 30;                                              // Record alert for timeout
+    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+    PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
+  }
+  else {
+    Log.info("Failed to connect");
+    current.alerts = 31;
+    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
+    PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
+  }
+
   systemStatusWriteNeeded = true;
   currentCountsWriteNeeded = true;
 }
@@ -769,14 +788,14 @@ void firmwareUpdateHandler(system_event_t event, int param) {
       break;
     case firmware_update_complete:
       firmwareUpdateInProgress = false;
-      current.alerts = 4;                                              // Record a successful attempt
+      current.alerts = 20;                                             // Record a successful attempt
       snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
       PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
       current.updateAttempts = 0;                                      // Zero the update attempts counter
       break;
     case firmware_update_failed:
       firmwareUpdateInProgress = false;
-      current.alerts = 6;                                              // Record a failed attempt
+      current.alerts = 22;                                             // Record a failed attempt
       snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
       PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publlish queue
       current.updateAttempts++;                                        // Increment the update attempts counter
@@ -788,8 +807,6 @@ void firmwareUpdateHandler(system_event_t event, int param) {
 // These are the functions that are part of the takeMeasurements call
 void takeMeasurements()
 {
-  if (Cellular.ready()) getSignalStrength();                           // Test signal strength if the cellular modem is on and ready
-
   getTemperature();                                                    // Get Temperature at startup as well
 
   sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
@@ -806,6 +823,7 @@ void takeMeasurements()
 
   if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
     System.setPowerConfiguration(SystemPowerConfiguration());          // Reset the PMIC
+    current.alerts = 11;                                               // Keep track of this
   }
 
   if (sysStatus.stateOfCharge < current.minBatteryLevel) {
@@ -828,12 +846,12 @@ bool isItSafeToCharge()                                                // Return
   if (current.temperature < 36 || current.temperature > 100 )  {       // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
     pmic.disableCharging();                                            // It is too cold or too hot to safely charge the battery
     sysStatus.batteryState = 1;                                        // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
-    current.alerts = 1;                                                // Set a value of 1 indicating that it is not safe to charge due to high / low temps
+    current.alerts = 10;                                                // Set a value of 1 indicating that it is not safe to charge due to high / low temps
     return false;
   }
   else {
     pmic.enableCharging();                                             // It is safe to charge the battery
-    if (current.alerts == 1) current.alerts = 0;                       // Reset the alerts flag if we previously had disabled charging
+    if (current.alerts == 10) current.alerts = 0;                      // Reset the alerts flag if we previously had disabled charging
     return true;
   }
 }
@@ -1093,7 +1111,7 @@ void resetEverything() {                                              // The dev
   current.maxConnectTime = 0;                                         // Reset values for this time period
   current.minBatteryLevel = 100;
   currentCountsWriteNeeded = true;
-  if (current.alerts ==7 || current.updateAttempts >=3) {             // We had tried to update enough times that we disabled updates for the day - resetting
+  if (current.alerts == 23 || current.updateAttempts >=3) {           // We had tried to update enough times that we disabled updates for the day - resetting
     System.enableUpdates();
     current.alerts = 0;
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
