@@ -83,12 +83,13 @@
 //v33.04 - Removed current limits from 33.03
 //v35.00 - Fixed issue with the PublishQueuePosix that could cause lockups, Fixed DST calculation for 2021 when DST changes on November 7th, fixed issue with sleeping too fast
 //v36.00 - Fix for location of queue and better handling for connection issues
-//v37.00 - Got rid of DSTRULES define - USA only for now, fixed issue with lowPowerMode loosing connection
+//v37.00 - Got rid of DSTRULES define - USA only for now, fixed issue with lowPowerMode loosing connection, fixed ternary
+//
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(37);
-char currentPointRelease[6] ="37.00";
+char currentPointRelease[6] ="37.01";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -426,7 +427,7 @@ void loop()
         Log.info("Connecting state but already connected");
         stayAwake = stayAwakeLong;                                     // Keeps device awake after reboot - helps with recovery
         stayAwakeTimeStamp = millis();
-        (retainedOldState = REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
+        (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
         break;
       }
 
@@ -464,7 +465,7 @@ void loop()
       recordConnectionDetails();                                       // Record outcome of connection attempt
       Log.info("Cloud connection successful");
       attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable verbose counts
-      (retainedOldState = REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
+      (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
     }
     else if (sysStatus.lastConnectionDuration > connectMaxTimeSec) {
       current.alerts = 2;                                              // Connection timed out alert
