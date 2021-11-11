@@ -7,7 +7,7 @@ struct systemStatus_structure {
   uint8_t structuresVersion;                        // Version of the data structures (system and data)
   uint8_t placeholdervalue;                         // For future use
   bool verboseCounts;                               // Tells us if we are sending verbose count webhooks
-  bool connectedStatus;                             // Are we connected?
+  bool placeholdervalue2;                           // Was connectedStatus - no longer used - available
   bool verboseMode;                                 // Turns on extra messaging
   bool solarPowerMode;                              // Powered by a solar panel or utility power
   bool lowPowerMode;                                // Does the device need to run disconnected to save battery

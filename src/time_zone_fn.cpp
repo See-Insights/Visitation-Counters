@@ -25,7 +25,7 @@ int setTimeZone(String command)
   Time.zone(sysStatus.timezone);
   systemStatusWriteNeeded = true;                                             // Need to store to FRAM back in the main loop
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
-  if (sysStatus.connectedStatus) {
+  if (Particle.connected()) {
     snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
     Particle.publish("Time",data, PRIVATE);
     waitUntil(meterParticlePublish);
