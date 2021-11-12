@@ -648,7 +648,7 @@ void  recordConnectionDetails()  {                                     // Whethe
 
   if (Particle.connected()) {
     Log.info("Cloud connection successful");
-    Particle.publish("Cellular",data,PRIVATE);
+    if (sysStatus.verboseMode) Particle.publish("Cellular",data,PRIVATE);
   }
   else if (Cellular.ready()) {                                        // We want to take note of this as it implies an issue with the Particle back-end
     Log.info("Connected to cellular but not Particle");
