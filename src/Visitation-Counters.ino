@@ -91,11 +91,13 @@
 //v36.00 - Fix for location of queue and better handling for connection issues
 //v37.00 - Got rid of DSTRULES define - USA only for now, fixed issue with lowPowerMode loosing connection,
 //v37.02 - Fixed ternary in CONNECTING state and revamped alert codes
+//v38.00 - v37.02 for general release
+//v39.00 - Fix for Alerts webhook and reduced max connection time to 10 minutes
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(37);
-char currentPointRelease[6] ="37.02";
+PRODUCT_VERSION(39);
+char currentPointRelease[6] ="39.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -138,7 +140,7 @@ struct systemStatus_structure sysStatus;
 // This is the maximum amount of time to allow for connecting to cloud. If this time is
 // exceeded, do a deep power down. This should not be less than 10 minutes. 11 minutes
 // is a reasonable value to use.
-unsigned long connectMaxTimeSec = 11 * 60;   // Timeout for trying to connect to Particle cloud in seconds
+unsigned long connectMaxTimeSec = 10 * 60;   // Timeout for trying to connect to Particle cloud in seconds - reduced to 10 mins
 // If updating, we need to delay sleep in order to give the download time to come through before sleeping
 const std::chrono::milliseconds firmwareUpdateMaxTime = 10min; // Set at least 5 minutes
 
@@ -636,7 +638,7 @@ void sensorControl(bool enableSensor) {                                // What i
 }
 
 void  recordConnectionDetails()  {                                     // Whether the connection was successful or not, we will collect and publish metrics
-  char data[32];
+  char data[64];
 
   if (sysStatus.lastConnectionDuration > connectMaxTimeSec+1) sysStatus.lastConnectionDuration = 0;
   else if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
@@ -652,13 +654,13 @@ void  recordConnectionDetails()  {                                     // Whethe
   }
   else if (Cellular.ready()) {                                        // We want to take note of this as it implies an issue with the Particle back-end
     Log.info("Connected to cellular but not Particle");
-    current.alerts = 30;                                              // Record alert for timeout
+    current.alerts = 30;                                              // Record alert for timeout on Particle but connected to cellular
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
     PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
   }
   else {
     Log.info("Failed to connect");
-    current.alerts = 31;
+    current.alerts = 31;                                              // Record alert for timeout on cellular
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
     PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
   }
