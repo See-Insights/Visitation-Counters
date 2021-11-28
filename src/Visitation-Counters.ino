@@ -15,6 +15,9 @@
 // device alerts
 * 10 = Battery temp too high / low to charge
 * 11 = PMIC Reset required
+* 12 = Initialization error (likely FRAM)
+* 13 = Excessive resets
+* 14 = Out of memory
 // deviceOS or Firmware alerts
 * 20 = Firmware update completed
 * 21 = Firmware update timed out
@@ -93,11 +96,12 @@
 //v37.02 - Fixed ternary in CONNECTING state and revamped alert codes
 //v38.00 - v37.02 for general release
 //v39.00 - Fix for Alerts webhook and reduced max connection time to 10 minutes
+//v40.00 - Updates in logic - enhanced ERROR section and better commenting throughout, Added WITH_ACK to webhook pucblishes, reordered some commands in startup, added new alert codes
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(39);
-char currentPointRelease[6] ="39.00";
+PRODUCT_VERSION(40);
+char currentPointRelease[6] ="40.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -111,14 +115,14 @@ const int FRAMversionNumber = 3;                    // Increment this number eac
 
 struct currentCounts_structure {                    // currently 10 bytes long
   int hourlyCount;                                  // In period hourly count
-  int placeHolderInteger;                           // So we don't loose the daily count on updates.
+  int placeHolderInteger;                           // This spot is available for future use
   int dailyCount;                                   // In period daily count
   unsigned long lastCountTime;                      // When did we record our last count
   int temperature;                                  // Current Temperature inside the enclosure
   int alerts;                                       // What is the current alert value - see secret decoder ring at top of comments
   int maxMinValue;                                  // Highest count in one minute in the current period
-  uint16_t maxConnectTime = 0;                      // Longest connect time for the day
-  int minBatteryLevel = 100;                        // Lowest Battery level for the day
+  uint16_t maxConnectTime = 0;                      // Longest connect time for the hour
+  int minBatteryLevel = 100;                        // Lowest Battery level for the day - not sure this is needed
   uint8_t updateAttempts = 0;                       // Number of attempted updates each day
 } current;
 
@@ -154,7 +158,8 @@ AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog l
 FuelGauge fuelGauge;                                // Needed to address issue with updates in low battery state
 
 // For monitoring / debugging, you can uncomment the next line
-SerialLogHandler logHandler(LOG_LEVEL_ALL);
+// SerialLogHandler logHandler(LOG_LEVEL_ALL);
+SerialLogHandler logHandler(LOG_LEVEL_INFO);
 
 // State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE, FIRMWARE_UPDATE};
@@ -167,7 +172,7 @@ State oldState = INITIALIZATION_STATE;
 const char* batteryContext[7] = {"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Diconnected"};
 
 // Pin Constants - Boron Carrier Board v1.x
-const int tmp36Pin =      A4;                       // Simple Analog temperature sensor
+const int tmp36Pin =      A4;                       // Simple Analog temperature sensor - on the carrier board - inside the enclosure
 const int wakeUpPin =     D8;                       // This is the Particle Electron WKP pin
 const int blueLED =       D7;                       // This LED is on the Electron itself
 const int userSwitch =    D4;                       // User switch with a pull-up resistor
@@ -177,7 +182,7 @@ const int disableModule = MOSI;                     // Bringining this low turns
 const int ledPower =      MISO;                     // Allows us to control the indicator LED on the sensor board
 
 // Timing Variables
-const int wakeBoundary = 1*3600 + 0*60 + 0;         // 1 hour 0 minutes 0 seconds
+const int wakeBoundary = 1*3600 + 0*60 + 0;         // Sets a reporting frequency of 1 hour 0 minutes 0 seconds
 const unsigned long stayAwakeLong = 90000;          // In lowPowerMode, how long to stay awake every hour
 const unsigned long webhookWait = 30000;            // How long will we wait for a WebHook response
 const unsigned long resetWait = 30000;              // How long will we wait in ERROR_STATE until reset
@@ -186,12 +191,10 @@ unsigned long stayAwake;                            // Stores the time we need t
 unsigned long resetTimeStamp = 0;                   // Resets - this keeps you from falling into a reset loop
 char currentOffsetStr[10];                          // What is our offset from UTC
 unsigned long lastReportedTime = 0;                 // Need to keep this separate from time so we know when to report
-unsigned long connectionStartTime;
-
+unsigned long connectionStartTime;                  // Timestamp to keep track of how long it takes to connect
 
 // Program Variables
-volatile bool watchdogFlag;                         // Flag to let us know we need to pet the dog
-bool dataInFlight = false;                          // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
+bool dataInFlight = false;                          // Tracks if we have sent data but not yet received a response
 bool firmwareUpdateInProgress = false;              // Helps us track if a firmware update is in progress
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 char batteryContextStr[16];                         // Tracks the battery context
@@ -199,12 +202,11 @@ char lowPowerModeStr[16];                           // In low power mode?
 char openTimeStr[8]="NA";                           // Park Open Time
 char closeTimeStr[8]="NA";                          // Park close Time
 char sensorTypeConfigStr[16];
-bool systemStatusWriteNeeded = false;               // Keep track of when we need to write
-bool currentCountsWriteNeeded = false;
+bool systemStatusWriteNeeded = false;               // Keep track of when we need to write - system object
+bool currentCountsWriteNeeded = false;              // Current counts object write needed
 
-// These variables are associated with the watchdog timer and will need to be better integrated
-int outOfMemory = -1;
-time_t RTCTime;
+// System Health Variables
+int outOfMemory = -1;                               // From reference code provided in AN0023 (see above)
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Interrupt Variables
@@ -232,7 +234,7 @@ void setup()                                        // Note: Disconnected Setup(
   deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
   System.on(firmware_update, firmwareUpdateHandler);// Registers a handler that will track if we are getting an update
-  System.on(out_of_memory, outOfMemoryHandler);                        // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
+  System.on(out_of_memory, outOfMemoryHandler);     // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
 
   Particle.variable("HourlyCount", current.hourlyCount);                // Define my Particle variables
   Particle.variable("DailyCount", current.dailyCount);                  // Note: Don't have to be connected for any of this!!!
@@ -263,30 +265,30 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("Set-SensorType",setSensorType);
 
   // Particle and System Set up next
-
   Particle.setDisconnectOptions(CloudDisconnectOptions().graceful(true).timeout(5s));  // Don't disconnect abruptly
 
+  // Watchdog Timer and Real Time Clock Initialization
   ab1805.withFOUT(D8).setup();                                         // The carrier board has D8 connected to FOUT for wake interrupts
   ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                         // Enable watchdog
 
-  if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
-    sysStatus.resetCount++;
-  }
-
+  // Take a look at the batter state of charge - good to do this before turning on the cellular modem
   fuelGauge.wakeup();                                                  // Expliciely wake the Feul gauge and give it a half-sec
   delay(500);
   fuelGauge.quickStart();                                              // May help us re-establish a baseline for SoC
 
   // Next we will load FRAM and check or reset variables to their correct values
   fram.begin();                                                        // Initialize the FRAM module
-
   byte tempVersion;
-  fram.get(FRAM::versionAddr, tempVersion);
+  fram.get(FRAM::versionAddr, tempVersion);                            // Load the FRAM memory map version into a variable for comparison
   if (tempVersion != FRAMversionNumber) {                              // Check to see if the memory map in the sketch matches the data on the chip
     fram.erase();                                                      // Reset the FRAM to correct the issue
     fram.put(FRAM::versionAddr, FRAMversionNumber);                    // Put the right value in
     fram.get(FRAM::versionAddr, tempVersion);                          // See if this worked
-    if (tempVersion != FRAMversionNumber) state = ERROR_STATE;         // Device will not work without FRAM
+    if (tempVersion != FRAMversionNumber) {
+      state = ERROR_STATE;                                             // Device will not work without FRAM will need to reset
+      resetTimeStamp = millis();                                       // Likely close to zero but, for form's sake
+      current.alerts = 12;                                             // FRAM is messed up so can't store but will be read in ERROR state
+    }
     else loadSystemDefaults();                                         // Out of the box, we need the device to be awake and connected
   }
   else {
@@ -294,11 +296,19 @@ void setup()                                        // Note: Disconnected Setup(
     fram.get(FRAM::currentCountsAddr,current);                         // Loead the current values array from FRAM
   }
 
-  checkSystemValues();                                                 // Make sure System values are all in valid range
+  // Now that the system object is loaded - let's make sure the values make sense
+  checkSystemValues();                                                // Make sure System values are all in valid range
+
+  // Take note if we are restarting due to a pin reset - either by the user or the watchdog - could be sign of trouble
+  if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
+    sysStatus.resetCount++;
+    if (sysStatus.resetCount > 3) current.alerts = 13;                 // Excessive resets
+  }
 
   // Publish Queue Posix is used exclusively for sending webhooks and update alerts in order to conserve RAM and reduce writes / wear
   PublishQueuePosix::instance().setup();                               // Start the Publish Queie
 
+  // Next - check to make sure we are not in an endless update loop
   if (current.updateAttempts >= 3) {
     char data[64];
     System.disableUpdates();                                           // We will only try to update three times in a day
@@ -313,24 +323,25 @@ void setup()                                        // Note: Disconnected Setup(
   Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
+  // If  the user is holding the user button - we will load defaults
   if (!digitalRead(userSwitch)) loadSystemDefaults();                  // Make sure the device wakes up and connects - reset to defaults and exit low power mode
 
+  // Strings make it easier to read the system values in the console / mobile app
   makeUpStringMessages();                                              // Updated system settings - refresh the string messages
 
+  // Make sure we have the right power settings
   setPowerConfig();                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
 
   // Done with the System Stuff - now we will focus on the current counts values
   if (current.hourlyCount) lastReportedTime = current.lastCountTime;
   else lastReportedTime = Time.now();                                  // Initialize it to now so that reporting can begin as soon as the hour changes
 
-  // Here is where the code diverges based on why we are running Setup()
   // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
   if (Time.day() != Time.day(current.lastCountTime)) {                 // Check to see if the device was last on in a different day
     resetEverything();                                                 // Zero the counts for the new day
   }
 
   takeMeasurements();                                                  // Populates values so you can read them before the hour
-
   if (sysStatus.lowBatteryMode) setLowPowerMode("1");                  // If battery is low we need to go to low power state
   if (sysStatus.verboseCounts) verboseCountsHandler();                 // If in verbose counts mode before, reset will clear it
 
@@ -344,7 +355,6 @@ void setup()                                        // Note: Disconnected Setup(
   if (state == INITIALIZATION_STATE) state = IDLE_STATE;               // IDLE unless otherwise from above code
 
   systemStatusWriteNeeded = true;                                      // Update FRAM with any changes from setup
-
   Log.info("Startup complete");
   digitalWrite(blueLED,LOW);                                           // Signal the end of startup
 }
@@ -361,7 +371,7 @@ void loop()
     if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
     break;
 
-  case SLEEPING_STATE: {                                               // This state is triggered once the park closes and runs until it opens
+  case SLEEPING_STATE: {                                               // This state is triggered once the park closes and runs until it opens - Sensor is off and interrupts disconnected
     if (state != oldState) publishStateTransition();
     detachInterrupt(intPin);                                           // Done sensing for the day
     sensorControl(false);                                              // Turn off the sensor module for the hour
@@ -369,8 +379,9 @@ void loop()
       state = REPORTING_STATE;
       break;
     }
-    if (Particle.connected() || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle
-    state = IDLE_STATE;                                                // Head back to the idle state to see what to do next
+    if (Particle.connected() || !Cellular.isOff()) disconnectFromParticle();  // Disconnect cleanly from Particle
+    stayAwake = 1000;                                                  // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour
+    state = IDLE_STATE;                                                // Head back to the idle state after we sleep
     ab1805.stopWDT();                                                  // No watchdogs interrupting our slumber
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
     config.mode(SystemSleepMode::ULTRA_LOW_POWER)
@@ -379,29 +390,27 @@ void loop()
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep device continues operations from here
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     fuelGauge.wakeup();                                                // Make sure the fuelGauge is woke
-    if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up
+    stayAwakeTimeStamp = millis();
+    if (result.wakeupPin() == userSwitch) {                            // If the user woke the device we need to get up - device was sleeping so we need to reset opening hours
       setLowPowerMode("0");                                            // We are waking the device for a reason
-      if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) {   // If this is sleepy time, then we need to change settings so device stays awake
-        Log.info("Resetting opening hours");
-        sysStatus.openTime = 0;                                        // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
-        sysStatus.closeTime = 24;                                      // This only resets if the device beleives it is off-hours
-        systemStatusWriteNeeded = true;
-      }
+      Log.info("Resetting opening hours");
+      sysStatus.openTime = 0;                                          // This is for the edge case where the clock is not set and the device won't connect as it thinks it is off hours
+      sysStatus.closeTime = 24;                                        // This only resets if the device beleives it is off-hours
       stayAwakeTimeStamp = millis();
       stayAwake = stayAwakeLong;
+      systemStatusWriteNeeded = true;
     }
-    if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
+    else if (Time.hour() < sysStatus.closeTime && Time.hour() >= sysStatus.openTime) { // We might wake up and find it is opening time.  Park is open let's get ready for the day
       sensorControl(true);                                             // Turn off the sensor module for the hour
       attachInterrupt(intPin, sensorISR, RISING);                      // Pressure Sensor interrupt from low to high
       stayAwake = stayAwakeLong;                                       // Keeps Boron awake after deep sleep - may not be needed
-      state = IDLE_STATE;
     }
     } break;
 
-  case NAPPING_STATE: {                                                // This state puts the device in low power mode quickly
+  case NAPPING_STATE: {                                                // This state puts the device in low power mode quickly - napping supports the sensor activity and interrupts
     if (state != oldState) publishStateTransition();
-    if (sensorDetect || countSignalTimer.isActive())  break;           // Don't nap until we are done with event
-    if (Particle.connected() || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle 
+    if (sensorDetect || countSignalTimer.isActive())  break;           // Don't nap until we are done with event - exits back to main loop but stays in napping state
+    if (Particle.connected() || !Cellular.isOff()) disconnectFromParticle();           // Disconnect cleanly from Particle and power down the modem
     stayAwake = 1000;                                                  // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour
     state = IDLE_STATE;                                                // Back to the IDLE_STATE after a nap - not enabling updates here as napping is typicallly disconnected
     ab1805.stopWDT();                                                  // If we are sleeping, we will miss petting the watchdog
@@ -413,11 +422,8 @@ void loop()
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     fuelGauge.wakeup();                                                // Make sure the fuelGauge is woke
-    if (result.wakeupPin() == intPin) {                                // Executions starts here after sleep - time or sensor interrupt?
-      stayAwakeTimeStamp = millis();
-    }
-    else if (result.wakeupPin() == userSwitch) setLowPowerMode("0");
-    else state = IDLE_STATE;
+    stayAwakeTimeStamp = millis();
+    if (result.wakeupPin() == userSwitch) setLowPowerMode("0");        // The user woke the device and we need to make sure it stays awake
     } break;
 
   case CONNECTING_STATE:{                                              // Will connect - or not and head back to the Idle state
@@ -485,7 +491,7 @@ void loop()
       }
       else state = IDLE_STATE;
     }
-  } break;
+    } break;
 
   case REPORTING_STATE:
     if (state != oldState) publishStateTransition();
@@ -507,52 +513,55 @@ void loop()
       state = IDLE_STATE;
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
-      resetTimeStamp = millis();
       current.alerts = 40;                                            // Raise the missed webhook flag
-      state = ERROR_STATE;                                            // Response timed out
+      if (Time.now() - sysStatus.lastHookResponse > 3 * 3600L) {      // Failed to get a webhook response for over three hours
+        resetTimeStamp = millis();
+        state = ERROR_STATE;                                          // Response timed out
+      } 
     }
     currentCountsWriteNeeded = true;
     systemStatusWriteNeeded = true;
-  } break;
+    } break;
 
-  case ERROR_STATE:                                                    // To be enhanced - where we deal with errors
-    if (state != oldState) publishStateTransition();
-    if (millis() > resetTimeStamp + resetWait) {
-      // The first condition implies that there is a connectivity issue - reset the modem
-      if ((Time.now() - sysStatus.lastConnection) > 7200L) {           // It is been over two hours since we last connected to the cloud - time for a reset
-        sysStatus.lastConnection = Time.now();                         // Make sure we don't do this very often
-        disconnectFromParticle();                                      // Make sure cellular modem is off
-        fram.put(FRAM::systemStatusAddr,sysStatus);
-        Log.error("failed to connect to cloud, doing deep reset");
-        delay(100);
-        System.reset();                                                // Reset and reboot
-      }
-      // The next is also a simple reset but only until reset count = 3
-      else if (sysStatus.resetCount <= 3) {                            // First try simple reset
-        if (Particle.connected()) {
-          waitUntil(meterParticlePublish);
-          Particle.publish("State","Error State - System Reset", PRIVATE, WITH_ACK);    // Brodcast Reset Action
-        }
+  case ERROR_STATE: {                                                  // New and improved - now looks at the alert codes
+    if (state != oldState) publishStateTransition();                   // We will apply the back-offs before sending to ERROR state - so if we are here we will take action
+    if (millis() > resetTimeStamp + resetWait) {                       // This simply gives us some time to catch the device if it is in a reset loop
+      if (Particle.connected()) {                                      // If we are connected to Particle - let's publish to let folks know what is going on
+        char errorStr[64];
+        snprintf(errorStr, sizeof(errorStr),"Resetting device with alert code %i",current.alerts);
+        Particle.publish("ERROR_STATE", errorStr, PRIVATE);
+        Log.info(errorStr);
         delay(2000);
-        System.reset();
+        disconnectFromParticle();                                      // Since we are resetting, let's disconnect cleanly
       }
-      // Once we have reset three times in one day, it is time for a full power cycle.
-      else {                                                           // If we have had 3 resets - time to do something more
-        if (Particle.connected()) {
-          waitUntil(meterParticlePublish);
-          Particle.publish("State","Error State - Full Modem Reset", PRIVATE, WITH_ACK);            // Brodcast Reset Action
-        }
-        delay(2000);
-        disconnectFromParticle();                                      // Make sure we shut down connections gracefully
-        sysStatus.resetCount = 0;                                      // Zero the ResetCount
-        fram.put(FRAM::systemStatusAddr,sysStatus);                    // Won't get back to the main loop
-        delay (100);
-        ab1805.deepPowerDown();                                        // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+
+      switch (current.alerts) {                                        // For now, no default state as there are only a few paths that lead to this state
+        case 12:                                                       // This is an initialization error - likely FRAM - need to power cycle to clear
+          ab1805.deepPowerDown();                                      // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+          break;
+
+        case 30 ... 31:                                                // Device failed to connect too many times
+          sysStatus.lastConnection = Time.now();                       // Make sure we don't do this very often
+          fram.put(FRAM::systemStatusAddr,sysStatus);                  // Unless a FRAM error sent us here - store alerts value
+          delay(100);                                                  // Time to write to FRAM
+          System.reset();  
+          break;
+
+        case 13:                                                       // Excessive resets of the device - time to power cycle
+          sysStatus.resetCount = 0;                                    // Reset so we don't do this too often
+          fram.put(FRAM::systemStatusAddr,sysStatus);                  // Won't get back to the main loop
+          delay (100);
+          ab1805.deepPowerDown();                                      // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
+          break;
+
+        case 14:                                                       // This is an out of memory error
+          System.reset();
+          break;
       }
     }
-    break;
+    } break;
 
-    case FIRMWARE_UPDATE: {
+  case FIRMWARE_UPDATE: {
       static unsigned long stateTime;
       char data[64];
 
@@ -586,7 +595,6 @@ void loop()
 
   PublishQueuePosix::instance().loop();                                // Check to see if we need to tend to the message queue
 
-
   if (systemStatusWriteNeeded) {                                       // These flags get set when a value is changed
     fram.put(FRAM::systemStatusAddr,sysStatus);
     systemStatusWriteNeeded = false;
@@ -597,15 +605,9 @@ void loop()
   }
 
   if (outOfMemory >= 0) {                                              // In this function we are going to reset the system if there is an out of memory error
-    char message[64];
-    snprintf(message, sizeof(message), "Out of memory occurred size=%d",outOfMemory);
-    Log.info(message);
-    if (Particle.connected()) {
-      waitUntil(meterParticlePublish);
-      Particle.publish("Memory",message,PRIVATE);                      // Publish to the console - this is important so we will not filter on verboseMod
-    }
-    delay(2000);
-    System.reset();                                                    // An out of memory condition occurred - reset device.
+    current.alerts = 14;                                               // Out of memory alert
+    resetTimeStamp = millis();
+    state = ERROR_STATE;
   }
   // End of housekeeping - end of main loop
 }
@@ -687,12 +689,16 @@ void recordCount() // This is where we check to see if an interrupt is set when 
   current.lastCountTime = Time.now();
   current.hourlyCount++;                                              // Increment the PersonCount
   current.dailyCount++;                                               // Increment the PersonCount
+  //  Debugging code
+  if (sysStatus.lowPowerMode) delay(200);
+  //  Debugging code
+  Log.info("Count, hourly: %i. daily: %i",current.hourlyCount,current.dailyCount);
   if (sysStatus.verboseMode && Particle.connected()) {
     char data[256];                                                   // Store the date in this character array - not global
     if (!sysStatus.verboseCounts) {
       snprintf(data, sizeof(data), "Count, hourly: %i, daily: %i",current.hourlyCount,current.dailyCount);
       waitUntil(meterParticlePublish);
-      Particle.publish("Count",data, PRIVATE);                      // Helpful for monitoring and calibration
+      Particle.publish("Count",data, PRIVATE);                        // Helpful for monitoring and calibration
     }
     else {
       snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i}",current.hourlyCount, current.dailyCount);
@@ -722,7 +728,8 @@ void sendEvent() {
     timeStampValue = lastReportedTime;                                // This should be the beginning of the current hour
   }
   snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
-  PublishQueuePosix::instance().publish("Ubidots-Counter-Hook-v1", data, PRIVATE);
+  PublishQueuePosix::instance().publish("Ubidots-Counter-Hook-v1", data, PRIVATE | WITH_ACK);
+  Log.info("Ubidots Webhook: %s", data);                              // For monitoring via serial
   current.hourlyCount = 0;                                            // Reset the hourly count
   current.alerts = 0;                                                 // Reset the alert after publish
 }
@@ -745,7 +752,7 @@ void publishToGoogleSheets() {
 
   snprintf(data, sizeof(data), "[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%i sec\",\"%i%%\"]", solarString, lowPowerModeStr, currentOffsetStr, openTimeStr, closeTimeStr, sensorTypeConfigStr, verboseString, current.maxConnectTime, current.minBatteryLevel);
   PublishQueuePosix::instance().publish("GoogleSheetsExport", data, PRIVATE);
-  Log.info("published: %s", data);
+  Log.info("Google Sheets: %s", data);
 
 }
 
@@ -1010,6 +1017,7 @@ void checkSystemValues() {                                          // Checks to
     current.maxConnectTime = 0;
     currentCountsWriteNeeded = true;
   }
+
   // None for lastHookResponse
   systemStatusWriteNeeded = true;
 }
