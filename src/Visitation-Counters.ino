@@ -97,11 +97,14 @@
 //v38.00 - v37.02 for general release
 //v39.00 - Fix for Alerts webhook and reduced max connection time to 10 minutes
 //v40.00 - Updates in logic - enhanced ERROR section and better commenting throughout, Added WITH_ACK to webhook pucblishes, reordered some commands in startup, added new alert codes
+//v41.00 - Added a daily reset of the resetCounts, Fixed issue with Error state, took out debugging delays
+//v42.00 - Fixed potential issue in Response Wait State
+//v43.00 - Updated to move sync time to CONNECTING and add WITH_ACK, and sync time when connected
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(40);
-char currentPointRelease[6] ="40.00";
+PRODUCT_VERSION(42);
+char currentPointRelease[6] ="43.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -271,7 +274,7 @@ void setup()                                        // Note: Disconnected Setup(
   ab1805.withFOUT(D8).setup();                                         // The carrier board has D8 connected to FOUT for wake interrupts
   ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                         // Enable watchdog
 
-  // Take a look at the batter state of charge - good to do this before turning on the cellular modem
+  // Take a look at the battery state of charge - good to do this before turning on the cellular modem
   fuelGauge.wakeup();                                                  // Expliciely wake the Feul gauge and give it a half-sec
   delay(500);
   fuelGauge.quickStart();                                              // May help us re-establish a baseline for SoC
@@ -472,6 +475,11 @@ void loop()
     sysStatus.lastConnectionDuration = int((millis() - connectionStartTimeStamp)/1000);
 
     if (Particle.connected()) {
+      if (!sysStatus.clockSet ) {                                      // Set the clock once a day
+        sysStatus.clockSet = true;
+        Particle.syncTime();                                           // Set the clock each day
+        waitFor(Particle.syncTimeDone,30000);                          // Wait for up to 30 seconds for the SyncTime to complete
+      }
       sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
       stayAwake = stayAwakeLong;                                       // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
@@ -514,13 +522,13 @@ void loop()
     }
     else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
       current.alerts = 40;                                            // Raise the missed webhook flag
+      currentCountsWriteNeeded = true;
       if (Time.now() - sysStatus.lastHookResponse > 3 * 3600L) {      // Failed to get a webhook response for over three hours
         resetTimeStamp = millis();
         state = ERROR_STATE;                                          // Response timed out
-      } 
+      }
+      else state = IDLE_STATE;
     }
-    currentCountsWriteNeeded = true;
-    systemStatusWriteNeeded = true;
     } break;
 
   case ERROR_STATE: {                                                  // New and improved - now looks at the alert codes
@@ -544,7 +552,7 @@ void loop()
           sysStatus.lastConnection = Time.now();                       // Make sure we don't do this very often
           fram.put(FRAM::systemStatusAddr,sysStatus);                  // Unless a FRAM error sent us here - store alerts value
           delay(100);                                                  // Time to write to FRAM
-          System.reset();  
+          System.reset();
           break;
 
         case 13:                                                       // Excessive resets of the device - time to power cycle
@@ -555,6 +563,14 @@ void loop()
           break;
 
         case 14:                                                       // This is an out of memory error
+          System.reset();
+          break;
+
+        case 40:                                                       // This is for failed webhook responses over three hours
+          System.reset();
+          break;
+
+        default:                                                        // Make sure that, no matter what - we do not get stuck here
           System.reset();
           break;
       }
@@ -689,9 +705,6 @@ void recordCount() // This is where we check to see if an interrupt is set when 
   current.lastCountTime = Time.now();
   current.hourlyCount++;                                              // Increment the PersonCount
   current.dailyCount++;                                               // Increment the PersonCount
-  //  Debugging code
-  if (sysStatus.lowPowerMode) delay(200);
-  //  Debugging code
   Log.info("Count, hourly: %i. daily: %i",current.hourlyCount,current.dailyCount);
   if (sysStatus.verboseMode && Particle.connected()) {
     char data[256];                                                   // Store the date in this character array - not global
@@ -751,7 +764,7 @@ void publishToGoogleSheets() {
   (sysStatus.verboseMode) ? strncpy(verboseString, "Verbose",sizeof(verboseString)) : strncpy(verboseString, "Not Verbose",sizeof(verboseString));
 
   snprintf(data, sizeof(data), "[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%i sec\",\"%i%%\"]", solarString, lowPowerModeStr, currentOffsetStr, openTimeStr, closeTimeStr, sensorTypeConfigStr, verboseString, current.maxConnectTime, current.minBatteryLevel);
-  PublishQueuePosix::instance().publish("GoogleSheetsExport", data, PRIVATE);
+  PublishQueuePosix::instance().publish("GoogleSheetsExport", data, PRIVATE | WITH_ACK);
   Log.info("Google Sheets: %s", data);
 
 }
@@ -823,7 +836,6 @@ void takeMeasurements()
   isItSafeToCharge();                                                  // See if it is safe to charge
 
   if (sysStatus.lowPowerMode) {                                        // Need to take these steps if we are sleeping
-    delay(500);
     fuelGauge.quickStart();                                            // May help us re-establish a baseline for SoC
     delay(500);
   }
@@ -1089,7 +1101,7 @@ int hardResetNow(String command)                                      // Will pe
 {
   if (command == "1")
   {
-    Particle.publish("Reset","Hard Reset in 2 seconds",PRIVATE);
+    if (Particle.connected()) Particle.publish("Reset","Hard Reset in 2 seconds",PRIVATE);
     delay(2000);
     ab1805.deepPowerDown(10);                                         // Power cycles the Boron and carrier board
     return 1;                                                         // Unfortunately, this will never be sent
@@ -1129,6 +1141,9 @@ void resetEverything() {                                              // The dev
   }
   current.updateAttempts = 0;                                         // Reset the update attempts counter for the day
   currentCountsWriteNeeded=true;                                      // Make sure that the values are updated in FRAM
+
+  sysStatus.resetCount = 0;                                           // Reset the reset count as well
+  systemStatusWriteNeeded = true;
 }
 
 int setSolarMode(String command) // Function to force sending data in current hour
@@ -1377,16 +1392,12 @@ void publishStateTransition(void)
  * Called from Reporting State ONLY. Cleans house at the beginning of a new day.
  */
 void dailyCleanup() {
-  Particle.publish("Daily Cleanup","Running", PRIVATE);                // Make sure this is being run
+  if (Particle.connected()) Particle.publish("Daily Cleanup","Running", PRIVATE);   // Make sure this is being run
+  Log.info("Running Daily Cleanup");
   sysStatus.verboseMode = false;                                       // Saves bandwidth - keep extra chatter off
-
-  if (Particle.connected()) {
-    Particle.syncTime();                                               // Set the clock each day - if we are connected
-    waitFor(Particle.syncTimeDone,30000);                              // Wait for up to 30 seconds for the SyncTime to complete
-  }
-
+  sysStatus.clockSet = false;                                          // Once a day we need to reset the clock
   isDSTusa() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here - once a day
-  
+
   if (sysStatus.solarPowerMode || sysStatus.stateOfCharge <= 65) {     // If Solar or if the battery is being discharged
     setLowPowerMode("1");
   }
