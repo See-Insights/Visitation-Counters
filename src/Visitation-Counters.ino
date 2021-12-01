@@ -99,11 +99,11 @@
 //v40.00 - Updates in logic - enhanced ERROR section and better commenting throughout, Added WITH_ACK to webhook pucblishes, reordered some commands in startup, added new alert codes
 //v41.00 - Added a daily reset of the resetCounts, Fixed issue with Error state, took out debugging delays
 //v42.00 - Fixed potential issue in Response Wait State
-//v43.00 - Updated to move sync time to CONNECTING and add WITH_ACK, and sync time when connected
+//v43.00 - Updated to move sync time to CONNECTING and add WITH_ACK
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(42);
+PRODUCT_VERSION(43);
 char currentPointRelease[6] ="43.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
