@@ -100,11 +100,12 @@
 //v41.00 - Added a daily reset of the resetCounts, Fixed issue with Error state, took out debugging delays
 //v42.00 - Fixed potential issue in Response Wait State
 //v43.00 - Updated to move sync time to CONNECTING and add WITH_ACK
+//v44.00 - Minor update to disconenct from Particle and added a step to power down the modem if in ERROR_STATE
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(43);
-char currentPointRelease[6] ="43.00";
+PRODUCT_VERSION(44);
+char currentPointRelease[6] ="44.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -540,10 +541,10 @@ void loop()
         Particle.publish("ERROR_STATE", errorStr, PRIVATE);
         Log.info(errorStr);
         delay(2000);
-        disconnectFromParticle();                                      // Since we are resetting, let's disconnect cleanly
       }
+      if (Particle.connected() || !Cellular.isOff()) disconnectFromParticle();  // Disconnect cleanly from Particle and power down the modem
 
-      switch (current.alerts) {                                        // For now, no default state as there are only a few paths that lead to this state
+      switch (current.alerts) {                                        // All of these events will reset the device
         case 12:                                                       // This is an initialization error - likely FRAM - need to power cycle to clear
           ab1805.deepPowerDown();                                      // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
           break;
@@ -1067,13 +1068,12 @@ void makeUpStringMessages() {
   return;
 }
 
-
 bool disconnectFromParticle()                                          // Ensures we disconnect cleanly from Particle
-                                                                       // Updated based onthis thread: https://community.particle.io/t/waitfor-particle-connected-timeout-does-not-time-out/59181
+                                                                       // Updated based on this thread: https://community.particle.io/t/waitfor-particle-connected-timeout-does-not-time-out/59181
 {
   Log.info("In the disconnect from Particle function");
   Particle.disconnect();
-  waitForNot(Particle.connected, 15000);                               // make sure before turning off the cellular modem
+  waitFor(Particle.disconnected, 15000);                               // make sure before turning off the cellular modem
   Cellular.disconnect();                                               // Disconnect from the cellular network
   Cellular.off();                                                      // Turn off the cellular modem
   waitFor(Cellular.isOff, 30000);                                      // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
