@@ -2,7 +2,7 @@
 * Project NC-State-Parks - new carrier for NC State Parks contract
 * Description: Cellular Connected Data Logger for Utility and Solar powered installations
 * Author: Chip McClelland
-* Date:20 November 20202
+* Date:20 November 2020
 */
 
 /*  This is a refinement on the Boron Connected Counter firmware and incorporates new watchdog and RTC
