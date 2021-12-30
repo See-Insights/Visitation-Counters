@@ -101,11 +101,13 @@
 //v42.00 - Fixed potential issue in Response Wait State
 //v43.00 - Updated to move sync time to CONNECTING and add WITH_ACK
 //v44.00 - Minor update to disconenct from Particle and added a step to power down the modem if in ERROR_STATE
+//v45.00 - Update to add remote logging.  New feature for testing not production across fleet
+
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(44);
-char currentPointRelease[6] ="44.00";
+PRODUCT_VERSION(45);
+char currentPointRelease[6] ="45.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -138,10 +140,29 @@ struct currentCounts_structure {                    // currently 10 bytes long
 #include "UnitTestCode.h"                           // This code will exercise the device
 #include "PublishQueuePosixRK.h"                    // Allows for queuing of messages - https://github.com/rickkas7/PublishQueuePosixRK
 
+// Start code block for remote logging
 // Libraries with helper functions
 #include "time_zone_fn.h"
 #include "sys_status.h"
 #include "particle_fn.h"
+
+// Libraries for Remote Logging
+#include "RemoteLogRK.h"
+#include "DeviceNameHelperRK.h"
+
+// Make sure you update to the host and port of your Papertrail logging instance!
+// Actually could be any UDP syslog server, not just Solarwinds Papertrail.
+const char *LOG_HOST = "logs4.papertrailapp.com";
+const uint16_t LOG_PORT = 31452;
+
+// Where to store the device name in EEPROM
+const int EEPROM_OFFSET = 0;
+// End code block for remote logging
+
+// Temporary log storage in retained memory - for remote logging
+retained uint8_t remoteLogBuf[2560];
+RemoteLog remoteLog(remoteLogBuf, sizeof(remoteLogBuf));
+
 
 struct systemStatus_structure sysStatus;
 
@@ -163,7 +184,8 @@ FuelGauge fuelGauge;                                // Needed to address issue w
 
 // For monitoring / debugging, you can uncomment the next line
 // SerialLogHandler logHandler(LOG_LEVEL_ALL);
-SerialLogHandler logHandler(LOG_LEVEL_INFO);
+// SerialLogHandler logHandler(LOG_LEVEL_INFO);
+SerialLogHandler serialLog;
 
 // State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE, FIRMWARE_UPDATE};
@@ -267,6 +289,32 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("Set-OpenTime",setOpenTime);
   Particle.function("Set-Close",setCloseTime);
   Particle.function("Set-SensorType",setSensorType);
+
+  // Begin remote logging code block
+  // This example uses DeviceNameHelperEEPROM but any subclass can be used
+  DeviceNameHelperEEPROM::instance().setup(EEPROM_OFFSET);
+
+  // Create a new remote log syslog over UDP logging server for Papertrail.
+  RemoteLogSyslogUDP *logServer = new RemoteLogSyslogUDP(LOG_HOST, LOG_PORT);
+
+  // Since neither RemoteLogRK nor DeviceNameHelperRK libraries know about each 
+  // other, this bit of boilerplate code is needed to hook the two together. 
+  // You can use any DeviceNameHelper subclass, such as DeviceNameHelperFile
+  // or DeviceNameHelperRetained here instead.
+  logServer->withDeviceNameCallback([](String &deviceName) {
+      if (DeviceNameHelperEEPROM::instance().hasName()) {
+          deviceName = DeviceNameHelperEEPROM::instance().getName();
+          return true;
+      }
+      else {
+          return false;
+      }
+  });
+
+  // Finish setting up remoteLog   
+  remoteLog.withServer(logServer);
+  remoteLog.setup();
+  // End Remote Logging code block
 
   // Particle and System Set up next
   Particle.setDisconnectOptions(CloudDisconnectOptions().graceful(true).timeout(5s));  // Don't disconnect abruptly
@@ -603,6 +651,11 @@ void loop()
     } break;
   }
   // Take care of housekeeping items here
+
+  // Begin remote logging code block
+  DeviceNameHelperRetained::instance().loop();
+  remoteLog.loop();
+  // End remote logging code block
 
   if (sensorDetect) recordCount();                                     // The ISR had raised the sensor flag - this will service interrupts regardless of state
 
