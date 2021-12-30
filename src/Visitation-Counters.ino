@@ -101,13 +101,13 @@
 //v42.00 - Fixed potential issue in Response Wait State
 //v43.00 - Updated to move sync time to CONNECTING and add WITH_ACK
 //v44.00 - Minor update to disconenct from Particle and added a step to power down the modem if in ERROR_STATE
-//v45.00 - Update to add remote logging.  New feature for testing not production across fleet
+//v44.10 - Update to add remote logging.  New feature for testing not production across fleet
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(45);
-char currentPointRelease[6] ="45.00";
+PRODUCT_VERSION(44);
+char currentPointRelease[6] ="44.10";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
