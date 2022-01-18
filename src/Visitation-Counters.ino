@@ -103,12 +103,13 @@
 //v44.00 - Minor update to disconenct from Particle and added a step to power down the modem if in ERROR_STATE
 //v44.10 - Update to add remote logging.  New feature for testing not production across fleet
 //v45.00 - Update to remote logging level (moved to ALL) reduced log.info statements throughout to save bandwidth. Added a second to the Sleep time to reduce round tripping (ILDE-SLEEP)
+//v46.00 - Fixing minor bugs - sleep time +1 second, placement of setup alert codes, serVerboseMode(), 
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(45);
-char currentPointRelease[6] ="45.00";
+PRODUCT_VERSION(46);
+char currentPointRelease[6] ="46.10";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -361,6 +362,12 @@ void setup()                                        // Note: Disconnected Setup(
   // Publish Queue Posix is used exclusively for sending webhooks and update alerts in order to conserve RAM and reduce writes / wear
   PublishQueuePosix::instance().setup();                               // Start the Publish Queie
 
+  // Next we set the timezone and check is we are in daylight savings time
+  Time.setDSTOffset(sysStatus.dstOffset);                              // Set the value from FRAM if in limits
+  isDSTusa() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
+  Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
+  snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
+
   // Next - check to make sure we are not in an endless update loop
   if (current.updateAttempts >= 3) {
     char data[64];
@@ -369,12 +376,6 @@ void setup()                                        // Note: Disconnected Setup(
     snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
     PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
   }
-
-  // Next we set the timezone and check is we are in daylight savings time
-  Time.setDSTOffset(sysStatus.dstOffset);                              // Set the value from FRAM if in limits
-  isDSTusa() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
-  Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
-  snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
 
   // If  the user is holding the user button - we will load defaults
   if (!digitalRead(userSwitch)) loadSystemDefaults();                  // Make sure the device wakes up and connects - reset to defaults and exit low power mode
@@ -436,7 +437,7 @@ void loop()
     stayAwake = 1000;                                                  // Once we come into this function, we need to reset stayAwake as it changes at the top of the hour
     state = IDLE_STATE;                                                // Head back to the idle state after we sleep
     ab1805.stopWDT();                                                  // No watchdogs interrupting our slumber
-    int wakeInSeconds = constrain((wakeBoundary - Time.now()) % wakeBoundary, 1, wakeBoundary) + 1;  // Adding one second to reduce prospect of round tripping to IDLE
+    int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary) + 1;  // Adding one second to reduce prospect of round tripping to IDLE
     config.mode(SystemSleepMode::ULTRA_LOW_POWER)
       .gpio(userSwitch,CHANGE)
       .duration(wakeInSeconds * 1000);
@@ -1272,7 +1273,6 @@ int setVerboseMode(String command) // Function to force sending data in current 
     sysStatus.verboseMode = true;
     systemStatusWriteNeeded = true;
     if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode", PRIVATE);
-    sensorControl(true);                                    // Make sure the sensor is on and correctly configured
     return 1;
   }
   else if (command == "0")
@@ -1280,7 +1280,6 @@ int setVerboseMode(String command) // Function to force sending data in current 
     sysStatus.verboseMode = false;
     systemStatusWriteNeeded = true;
     if (Particle.connected()) Particle.publish("Mode","Cleared Verbose Mode", PRIVATE);
-    sensorControl(true);                                      // Make sure the sensor is on and correctly configured
     return 1;
   }
   else return 0;
