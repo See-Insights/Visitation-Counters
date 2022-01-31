@@ -27,7 +27,8 @@
 * 23 = Update attempt limit reached - done for the day
 // Connectivity alerts
 * 30 = Particle connection timed out but Cellular connection completed
-* 31 = Failed to connect to Particle or cellular
+* 31 = Failed to connect to Particle or cellular - skipping to next hour
+* 32 = Failed to connect quickly - resetting to keep trying
 // Particle cloud alerts
 * 40 = Failed to get Webhook response when connected
 */
@@ -110,12 +111,13 @@
 //v46.30 - Added support for Verizon / 3rd Party SIMS, Added a daily update to RSSI and Location to Ubidots
 //v46.40 - Added logic to handle an error where Particle would not disconnect or the cellular modem would not shut down
 //v46.50 - Added support for user button while connected to trigger GPS and Cell Status event
+//v46.60 - New approach for connecting - connection decision moved to reporting.  Using resets to speed connection.  Moving reset logic to ERROR_STATE
 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(46);
-char currentPointRelease[6] ="46.50";
+char currentPointRelease[6] ="46.60";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -129,7 +131,7 @@ const int FRAMversionNumber = 3;                    // Increment this number eac
 
 struct currentCounts_structure {                    // currently 10 bytes long
   int hourlyCount;                                  // In period hourly count
-  int placeHolderInteger;                           // This spot is available for future use
+  int currentConnectionLimit;                       // Here we will store the connection limit (180, 300 or 420 seconds)  - 180 indicates a new connection cycle
   int dailyCount;                                   // In period daily count
   unsigned long lastCountTime;                      // When did we record our last count
   int temperature;                                  // Current Temperature inside the enclosure
@@ -372,6 +374,7 @@ void setup()                                        // Note: Disconnected Setup(
     attachInterrupt(intPin, sensorISR, RISING);                        // Pressure Sensor interrupt from low to high
     stayAwake = stayAwakeLong;                                         // Keeps Boron awake after reboot - helps with recovery
     if (!sysStatus.lowPowerMode) state = CONNECTING_STATE;             // If we are not in low power mode, we should connect
+    else if (current.currentConnectionLimit != 180) state = CONNECTING_STATE; // We are in the middle of a connection attempt
   }
 
   if (state == INITIALIZATION_STATE) state = IDLE_STATE;               // IDLE unless otherwise from above code
@@ -379,9 +382,6 @@ void setup()                                        // Note: Disconnected Setup(
   systemStatusWriteNeeded = true;                                      // Update FRAM with any changes from setup
   Log.info("Startup complete");
   digitalWrite(blueLED,LOW);                                           // Signal the end of startup
-
-  Log.info("SIM card set to %s",simCardStr);
-  Log.info("SysStatus object is %i bytes",sizeof(sysStatus));
 }
 
 
@@ -464,6 +464,60 @@ void loop()
     if (result.wakeupPin() == userSwitch) setLowPowerMode("0");        // The user woke the device and we need to make sure it stays awake
     } break;
 
+  
+  case REPORTING_STATE:                                               // In this state we will publish the hourly totals to the queue and decide whether we should connect
+    if (state != oldState) publishStateTransition();
+    lastReportedTime = Time.now();                                    // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
+    takeMeasurements();                                               // Take Measurements here for reporting
+    if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
+    sendEvent();                                                      // Publish hourly but not at opening time as there is nothing to publish
+    state = CONNECTING_STATE;                                         // Default behaviour would be to connect and send report to Ubidots
+
+    // Let's make sure we need to connect if we are already, we can skip that step
+    if (Particle.connected()) {
+      stayAwake = stayAwakeLong;                                      // Keeps device awake after reboot - helps with recovery
+      stayAwakeTimeStamp = millis();
+      state = RESP_WAIT_STATE;
+    }
+    // If we are in a low battery state - we are not going to connect unless we are over-riding with user switch (active low)
+    else if (sysStatus.lowBatteryMode && digitalRead(userSwitch)) {
+      Log.info("Not connecting - low battery mode");
+      state = IDLE_STATE;
+    }
+    // If we are in low power mode, we may bail if battery is too low and we need to reduce reporting frequency
+    else if (sysStatus.lowPowerMode && digitalRead(userSwitch)) {      // Low power mode and user switch not pressed
+      if (sysStatus.stateOfCharge > 65) {
+        Log.info("Sufficient battery power connecting");
+      }
+      else if (sysStatus.stateOfCharge <= 50 && (Time.hour() % 4)) {   // If the battery level is <50%, only connect every fourth hour
+        Log.info("Not connecting - <50%% charge - four hour schedule");
+        state = IDLE_STATE;                                            // Will send us to connecting state - and it will send us back here
+      }                                                                // Leave this state and go connect - will return only if we are successful in connecting
+      else if (sysStatus.stateOfCharge <= 65 && (Time.hour() % 2)) {   // If the battery level is 50% -  65%, only connect every other hour
+        Log.info("Not connecting - 50-65%% charge - two hour schedule");
+        state = IDLE_STATE;                                            // Will send us to connecting state - and it will send us back here
+        break;                                                         // Leave this state and go connect - will return only if we are successful in connecting
+      }
+    }
+    break;
+
+  case RESP_WAIT_STATE: {
+    static unsigned long webhookTimeStamp = 0;                         // Webhook time stamp
+    if (state != oldState) {
+      webhookTimeStamp = millis();                                     // We are connected and we have published, head to the response wait state
+      dataInFlight = true;                                             // set the data inflight flag
+      publishStateTransition();
+    }
+    if (!dataInFlight)  {                                              // Response received --> back to IDLE state
+      state = IDLE_STATE;
+    }
+    else if (millis() - webhookTimeStamp > webhookWait) {              // If it takes too long - will need to reset
+      current.alerts = 40;                                             // Raise the missed webhook flag
+      currentCountsWriteNeeded = true;
+      state = ERROR_STATE;                                             // Go to the ERROR state to decide our fate
+    }
+    } break;
+
   case CONNECTING_STATE:{                                              // Will connect - or not and head back to the Idle state
     static State retainedOldState;                                     // Keep track for where to go next (depends on whether we were called from Reporting)
     static unsigned long connectionStartTimeStamp;                     // Time in Millis that helps us know how long it took to connect
@@ -472,101 +526,61 @@ void loop()
       retainedOldState = oldState;                                     // Keep track for where to go next
       sysStatus.lastConnectionDuration = 0;                            // Will exit with 0 if we do not connect or are connected or the connection time if we do
       publishStateTransition();
-
-      // Let's make sure we need to connect
-      if (Particle.connected()) {
-        Log.info("Connecting state but already connected");
-        stayAwake = stayAwakeLong;                                     // Keeps device awake after reboot - helps with recovery
-        stayAwakeTimeStamp = millis();
-        (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
-        break;
-      }
-
-      // If we are in a low battery state - we are not going to connect unless we are over-riding with user switch (active low)
-      if (sysStatus.lowBatteryMode && digitalRead(userSwitch)) {
-        Log.info("Connecting state but low battery mode");
-        state = IDLE_STATE;
-        break;
-      }
-      // If we are in low power mode, we may bail if battery is too low and we need to reduce reporting frequency
-      if (sysStatus.lowPowerMode && digitalRead(userSwitch)) {         // Low power mode and user switch not pressed
-        if (sysStatus.stateOfCharge <= 50 && (Time.hour() % 4)) {      // If the battery level is <50%, only connect every fourth hour
-          Log.info("Connecting but <50%% charge - four hour schedule");
-          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here
-          break;
-        }                                                              // Leave this state and go connect - will return only if we are successful in connecting
-        else if (sysStatus.stateOfCharge <= 65 && (Time.hour() % 2)) { // If the battery level is 50% -  65%, only connect every other hour
-          Log.info("Connecting but 50-65%% charge - two hour schedule");
-          state = IDLE_STATE;                                          // Will send us to connecting state - and it will send us back here
-          break;                                                       // Leave this state and go connect - will return only if we are successful in connecting
-        }
-      }
-      // OK, let's do this thing!
       connectionStartTimeStamp = millis();                             // Have to use millis as the clock will get reset on connect
-      Cellular.on();                                                   // Needed until they fix this: https://github.com/particle-iot/device-os/issues/1631
       Particle.connect();                                              // Told the Particle to connect, now we need to wait
     }
 
     sysStatus.lastConnectionDuration = int((millis() - connectionStartTimeStamp)/1000);
 
     if (Particle.connected()) {
+      systemStatusWriteNeeded = true;
+      currentCountsWriteNeeded = true;
       if (!sysStatus.clockSet ) {                                      // Set the clock once a day - and send the location / signal strength
         sysStatus.clockSet = true;
         Particle.syncTime();                                           // Set the clock each day
-        waitFor(Particle.syncTimeDone,30000);                          // Wait for up to 30 seconds for the SyncTime to complete
+        publishCellularInformation();                                  // Publish device cellular information once a day as well
       }
+      current.currentConnectionLimit = 180;                            // Successful connection - resetting the connection timer
       sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
       stayAwake = stayAwakeLong;                                       // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
-      recordConnectionDetails();                                       // Record outcome of connection attempt
-      attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable verbose counts
+      if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
+      getSignalStrength();                                             // Test signal strength if the cellular modem is on and ready
+      char data[64];
+      snprintf(data, sizeof(data),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
+      Log.info(data);
+      if (sysStatus.verboseMode) Particle.publish("Cellular",data,PRIVATE);
+      attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable sending connection details
       (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
       if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode
     }
-    else if (sysStatus.lastConnectionDuration > connectMaxTimeSec) {
-      recordConnectionDetails();                                       // Record outcome of connection attempt
-      Log.info("cloud connection unsuccessful");
-      disconnectFromParticle();                                        // Make sure the modem is turned off
-      if (sysStatus.solarPowerMode) setLowPowerMode("1");              // If we cannot connect, there is no point to stayng out of low power mode
-      if ((Time.now() - sysStatus.lastConnection) > 3 * 3600L) {       // Only sends to ERROR_STATE if it has been over three hours - this ties to reporting and low battery state
-        state = ERROR_STATE;
-        resetTimeStamp = millis();
-        break;
+    else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) {
+      currentCountsWriteNeeded = true;                                 // Record in FRAM as we will soon reset
+      state = ERROR_STATE;                                             // Note - not setting the ERROR timestamp to make this go quickly
+      resetTimeStamp = millis();                    // Take this out once we have things working
+      switch (current.currentConnectionLimit) {
+        case (180):                                                    // A connection limit of 180 indicates that this is a new attempt
+          current.currentConnectionLimit = 300;                        // Increment the limit to the next value
+          current.alerts = 32;                                         // Indicates we will reset and keep trying
+          Log.info("3 Minute connection time exceeded - resetting");
+          break; 
+        case (300): 
+          current.currentConnectionLimit = 420;                        // Increment the limit to the next value
+          current.alerts = 32;                                         // Indicates we will reset and keep trying
+          Log.info("5 Minute connection time exceeded - resetting");
+          break;  
+        case (420):
+          current.currentConnectionLimit = 180;                        // Giving up - we are not going to connect this hour - reset for next
+          current.alerts = 31;                                         // Indicates we are done with this attempt
+          Log.info("7 Minute connection time exceeded - giving up");
+          break;                              
       }
-      else state = IDLE_STATE;
-    }
-    } break;
-
-  case REPORTING_STATE:
-    if (state != oldState) publishStateTransition();
-    lastReportedTime = Time.now();                                    // We are only going to report once each hour from the IDLE state.  We may or may not connect to Particle
-    takeMeasurements();                                               // Take Measurements here for reporting
-    if (Time.hour() == sysStatus.openTime) dailyCleanup();            // Once a day, clean house and publish to Google Sheets
-    sendEvent();                                                      // Publish hourly but not at opening time as there is nothing to publish
-    state = CONNECTING_STATE;                                         // We are only passing through this state once each hour
-      Log.info("SIM card set to %s",simCardStr);
-    break;
-
-  case RESP_WAIT_STATE: {
-    static unsigned long webhookTimeStamp = 0;                        // Webhook time stamp
-    if (state != oldState) {
-      webhookTimeStamp = millis();                                    // We are connected and we have published, head to the response wait state
-      dataInFlight = true;                                            // set the data inflight flag
-      publishStateTransition();
-    }
-    if (!dataInFlight)  {                                             // Response received --> back to IDLE state
-      state = IDLE_STATE;
-    }
-    else if (millis() - webhookTimeStamp > webhookWait) {             // If it takes too long - will need to reset
-      current.alerts = 40;                                            // Raise the missed webhook flag
-      currentCountsWriteNeeded = true;
-      if (Time.now() - sysStatus.lastHookResponse > 3 * 3600L) {      // Failed to get a webhook response for over three hours
-        resetTimeStamp = millis();
-        state = ERROR_STATE;                                          // Response timed out
+      if (Cellular.ready()) {                                          // We connected to the cellular network but not to Particle
+        Log.info("Connected to cellular but not Particle");
+        current.alerts = 30;                                           // Record alert for timeout on Particle but connected to cellular
       }
-      else state = IDLE_STATE;
     }
-    } break;
+   } break;
 
   case ERROR_STATE: {                                                  // New and improved - now looks at the alert codes
     if (state != oldState) publishStateTransition();                   // We will apply the back-offs before sending to ERROR state - so if we are here we will take action
@@ -584,13 +598,6 @@ void loop()
           ab1805.deepPowerDown();                                      // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
           break;
 
-        case 30 ... 31:                                                // Device failed to connect too many times
-          sysStatus.lastConnection = Time.now();                       // Make sure we don't do this very often
-          fram.put(FRAM::systemStatusAddr,sysStatus);                  // Unless a FRAM error sent us here - store alerts value
-          delay(100);                                                  // Time to write to FRAM
-          System.reset();
-          break;
-
         case 13:                                                       // Excessive resets of the device - time to power cycle
           sysStatus.resetCount = 0;                                    // Reset so we don't do this too often
           fram.put(FRAM::systemStatusAddr,sysStatus);                  // Won't get back to the main loop
@@ -606,11 +613,30 @@ void loop()
           ab1805.deepPowerDown();                                      // 30 second power cycle of Boron including cellular modem, carrier board and all peripherals
           break;
 
-        case 40:                                                       // This is for failed webhook responses over three hours
+        case 30 ... 31:                                                // Device failed to connect - bailing for this hour or resetting depending
+          if (Time.now() - sysStatus.lastConnection > 2 * 3600L) {     // If we fail to connect for a couple hours in a row, let's power cycle the device
+            sysStatus.lastConnection = Time.now();                     // Make sure we don't do this very often
+            fram.put(FRAM::systemStatusAddr,sysStatus);                // Unless a FRAM error sent us here - store alerts value
+            delay(100);                                                // Time to write to FRAM
+            ab1805.deepPowerDown();                                    // Time to power cycle the device
+          }
+          state = IDLE_STATE;                                          // Go back to the main loop - try again next hour
+          Log.info("Failed to connect - try again next hour");
+          break;
+
+        case 32:                                                       // We are still trying to connect but need to reset first as it is not happening quickly enough
           System.reset();
           break;
 
-        default:                                                        // Make sure that, no matter what - we do not get stuck here
+        case 40:                                                       // This is for failed webhook responses over three hours
+          if (Time.now() - sysStatus.lastHookResponse > 3 * 3600L) {      // Failed to get a webhook response for over three hours
+            System.reset();
+          }
+          state = IDLE_STATE;
+          Log.info("Failed to get Webhook response - try again next hour");
+          break;
+
+        default:                                                       // Make sure that, no matter what - we do not get stuck here
           System.reset();
           break;
       }
@@ -698,39 +724,6 @@ void sensorControl(bool enableSensor) {                                // What i
 
 }
 
-void  recordConnectionDetails()  {                                     // Whether the connection was successful or not, we will collect and publish metrics
-  char data[64];
-
-  if (sysStatus.lastConnectionDuration > connectMaxTimeSec+1) sysStatus.lastConnectionDuration = 0;
-  else if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
-
-  if (Cellular.ready()) getSignalStrength();                           // Test signal strength if the cellular modem is on and ready
-
-  snprintf(data, sizeof(data),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
-  Log.info(data);
-
-  if (Particle.connected()) {
-    Log.info("Cloud connection successful");
-    if (sysStatus.verboseMode) Particle.publish("Cellular",data,PRIVATE);
-  }
-  else if (Cellular.ready()) {                                        // We want to take note of this as it implies an issue with the Particle back-end
-    Log.info("Connected to cellular but not Particle");
-    current.alerts = 30;                                              // Record alert for timeout on Particle but connected to cellular
-    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
-    PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
-  }
-  else {
-    Log.info("Failed to connect");
-    current.alerts = 31;                                              // Record alert for timeout on cellular
-    snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
-    PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
-  }
-
-  systemStatusWriteNeeded = true;
-  currentCountsWriteNeeded = true;
-}
-
-
 void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the device
 {
   static byte currentMinutePeriod;                                    // Current minute
@@ -807,7 +800,7 @@ void publishToGoogleSheets() {
   (sysStatus.solarPowerMode) ? strncpy(solarString,"Solar",sizeof(solarString)) : strncpy(solarString,"Utility",sizeof(solarString));
   (sysStatus.verboseMode) ? strncpy(verboseString, "Verbose",sizeof(verboseString)) : strncpy(verboseString, "Not Verbose",sizeof(verboseString));
 
-  snprintf(data, sizeof(data), "[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%i sec\",\"%i%%\"]", solarString, lowPowerModeStr, currentOffsetStr, openTimeStr, closeTimeStr, sensorTypeConfigStr, verboseString, current.maxConnectTime, current.minBatteryLevel);
+  snprintf(data, sizeof(data), "[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%i sec\",\"%i%%\",\"%s\"]", solarString, lowPowerModeStr, currentOffsetStr, openTimeStr, closeTimeStr, sensorTypeConfigStr, verboseString, current.maxConnectTime, current.minBatteryLevel,simCardStr);
   PublishQueuePosix::instance().publish("GoogleSheetsExport", data, PRIVATE | WITH_ACK);
   Log.info("Google Sheets: %s", data);
 
@@ -1118,21 +1111,32 @@ void makeUpStringMessages() {
   return;
 }
 
+/**
+ * @brief Disconnect from Particle function has one purpose - to disconnect the Boron from Particle, the cellular network and to power down the cellular modem to save power
+ * 
+ * @details This function is supposed to be able to handle most issues and tee up a power cycle of the Boron and the Cellular Modem if things do not go as planned
+ * 
+ * @return true - Both disconnect from Particle and the powering down of the cellular modem are successful
+ * @return false - One or the other failed and the device will go to the ERROR_STATE to be power cycled.
+ */
+
 bool disconnectFromParticle()                                          // Ensures we disconnect cleanly from Particle
                                                                        // Updated based on this thread: https://community.particle.io/t/waitfor-particle-connected-timeout-does-not-time-out/59181
 {
   Log.info("In the disconnect from Particle function");
-  Particle.disconnect();
+  // Particle.disconnect();
   detachInterrupt(userSwitch);                                         // Stop watching the userSwitch as we will no longer be connected
-  /*
-  if (waitForNot(Particle.disconnected, 15000)) {                      // make sure before turning off the cellular modem
+  Particle.disconnect();                                               // Disconnect from Particle
+  waitForNot(Particle.connected, 15000);  // 15 second delay() 
+  Particle.process();  // or a delay
+  if (Particle.connected()) {                      // As this disconnect from Particle thing can be a·syn·chro·nous, we need to take an extra step to wait, 
     Log.info("Failed to disconnect from Particle");
     return(false);
   }
-  */
   Cellular.disconnect();                                               // Disconnect from the cellular network
   Cellular.off();                                                      // Turn off the cellular modem
   waitFor(Cellular.isOff, 30000);                                      // As per TAN004: https://support.particle.io/hc/en-us/articles/1260802113569-TAN004-Power-off-Recommendations-for-SARA-R410M-Equipped-Devices
+  Particle.process();
   if (Cellular.isOn()) {                                               // At this point, if cellular is not off, we have a problem
     Log.info("Failed to turn off the Cellular modem");
     return(false);                                                     // Let the calling function know that we were not able to turn off the cellular modem
