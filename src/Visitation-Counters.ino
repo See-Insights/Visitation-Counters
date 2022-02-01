@@ -113,11 +113,12 @@
 //v46.50 - Added support for user button while connected to trigger GPS and Cell Status event
 //v46.60 - New approach for connecting - connection decision moved to reporting.  Using resets to speed connection.  Moving reset logic to ERROR_STATE
 //v46.61 - Added logic in check values for the connection limit and a "backoff" for when not in low power mode
+//v46.62 - Fixed formatting of time_t in the disconnectFromParticle function
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
 PRODUCT_VERSION(46);
-char currentPointRelease[6] ="46.61";
+char currentPointRelease[6] ="46.62";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -1165,7 +1166,7 @@ bool disconnectFromParticle()                                          // Ensure
     Log.info("Failed to disconnect from Particle");
     return(false);
   }
-  else Log.info("Disconnected from Particle in %lli seconds", Time.now() - startTime);
+  else Log.info("Disconnected from Particle in %i seconds", (int)(Time.now() - startTime));
   // Then we need to disconnect from Cellular and power down the cellular modem
   startTime = Time.now();
   Cellular.disconnect();                                               // Disconnect from the cellular network
@@ -1177,7 +1178,7 @@ bool disconnectFromParticle()                                          // Ensure
     return(false);                                                     // Let the calling function know that we were not able to turn off the cellular modem
   }
   else {
-    Log.info("Turned off the cellular modem in %lli seconds", Time.now() - startTime);
+    Log.info("Turned off the cellular modem in %i seconds", (int)(Time.now() - startTime));
     return true;
   }
 }
