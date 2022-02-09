@@ -115,7 +115,7 @@
 //v46.61 - Added logic in check values for the connection limit and a "backoff" for when not in low power mode
 //v46.62 - Fixed formatting of time_t in the disconnectFromParticle function
 //v46.63 - Fixed calculation of connection duration, took out 30 second delay before resetting
-//v46.64 - Removed unit test header file, fixed login on back off flag in connecting state, changed consequence for cellular/no particle
+//v46.64 - Removed unit test header file, fixed login on back off flag in connecting state, changed consequence for cellular/no particle - this version will be deployed to the fleet. 
 
 // Particle Product definitions
 PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
@@ -565,9 +565,7 @@ void loop()
       if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode
     }
     else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) {
-      // Debugging code
       Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
-      // Debugging code
       currentCountsWriteNeeded = true;                                 // Record in FRAM as we will soon reset
       state = ERROR_STATE;                                             // Note - not setting the ERROR timestamp to make this go quickly
       switch (current.currentConnectionLimit) {
