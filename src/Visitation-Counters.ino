@@ -21,9 +21,9 @@
 * 14 = Out of memory
 * 15 = Particle disconnect or Modem Power Down Failure
 // deviceOS or Firmware alerts
-* 20 = Firmware update completed
-* 21 = Firmware update timed out
-* 22 = Firmware update failed
+* 20 = Firmware update completed - deleted
+* 21 = Firmware update timed out - deleted
+* 22 = Firmware update failed - deleted
 * 23 = Update attempt limit reached - done for the day
 // Connectivity alerts
 * 30 = Particle connection timed out but Cellular connection completed
@@ -116,11 +116,15 @@
 //v46.62 - Fixed formatting of time_t in the disconnectFromParticle function
 //v46.63 - Fixed calculation of connection duration, took out 30 second delay before resetting
 //v46.64 - Removed unit test header file, fixed login on back off flag in connecting state, changed consequence for cellular/no particle - this version will be deployed to the fleet. 
+//v46.65 - Moving to a new model to report to Google Firestore - Raising excessive resets threshold
+//v46.66 - Moving to deviceOS@4.0.0 - removing firmware update code / complexity - will increase integer once tested, increase reset tolerance, getting rid of Fuel and name helper
+        //  - getting rid of the complexity of back-offs
+//v47.00 - Recompiled for deviceOS@4.0.1 to fix connectivity issues.
+//v48.00 - Updated to address issue with Error 30 assignment by mistake
 
 // Particle Product definitions
-PRODUCT_ID(PLATFORM_ID);                            // No longer need to specify - but device needs to be added to product ahead of time.
-PRODUCT_VERSION(46);
-char currentPointRelease[6] ="46.64";
+PRODUCT_VERSION(48);
+char currentPointRelease[6] ="48.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -175,13 +179,14 @@ AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog l
 FuelGauge fuelGauge;                                // Needed to address issue with updates in low battery state
 
 // For monitoring / debugging, you have some options on the next few lines
-SerialLogHandler logHandler(LOG_LEVEL_ALL);         // All the loggings 
+SerialLogHandler logHandler(LOG_LEVEL_TRACE);
+//SerialLogHandler logHandler(LOG_LEVEL_ALL);         // All the loggings 
 // SerialLogHandler logHandler(LOG_LEVEL_INFO);     // Easier to see the program flow
 // Serial1LogHandler logHandler1(57600);            // This line is for when we are using the OTII ARC for power analysis
 
 // State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE, FIRMWARE_UPDATE};
-char stateNames[9][16] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Connecting", "Reporting", "Response Wait", "Firmware Update"};
+char stateNames[9][16] = {"Initialize", "Error", "Idle", "Sleeping", "Napping", "Connecting", "Reporting", "Response Wait"};
 State state = INITIALIZATION_STATE;
 State oldState = INITIALIZATION_STATE;
 
@@ -251,7 +256,6 @@ void setup()                                        // Note: Disconnected Setup(
   String deviceID = System.deviceID();              // Multiple devices share the same hook - keeps things straight
   deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
-  System.on(firmware_update, firmwareUpdateHandler);// Registers a handler that will track if we are getting an update
   System.on(out_of_memory, outOfMemoryHandler);     // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
 
   Particle.variable("HourlyCount", current.hourlyCount);                // Define my Particle variables
@@ -291,11 +295,6 @@ void setup()                                        // Note: Disconnected Setup(
   ab1805.withFOUT(D8).setup();                                         // The carrier board has D8 connected to FOUT for wake interrupts
   ab1805.setWDT(AB1805::WATCHDOG_MAX_SECONDS);                         // Enable watchdog
 
-  // Take a look at the battery state of charge - good to do this before turning on the cellular modem
-  fuelGauge.wakeup();                                                  // Expliciely wake the Feul gauge and give it a half-sec
-  delay(500);
-  fuelGauge.quickStart();                                              // May help us re-establish a baseline for SoC
-
   // Next we will load FRAM and check or reset variables to their correct values
   fram.begin();                                                        // Initialize the FRAM module
   byte tempVersion;
@@ -324,7 +323,7 @@ void setup()                                        // Note: Disconnected Setup(
   // Take note if we are restarting due to a pin reset - either by the user or the watchdog - could be sign of trouble
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
-    if (sysStatus.resetCount > 3) current.alerts = 13;                 // Excessive resets
+    if (sysStatus.resetCount > 6) current.alerts = 13;                 // Excessive resets
   }
 
   // Publish Queue Posix is used exclusively for sending webhooks and update alerts in order to conserve RAM and reduce writes / wear
@@ -352,7 +351,7 @@ void setup()                                        // Note: Disconnected Setup(
   makeUpStringMessages();                                              // Updated system settings - refresh the string messages
 
   // Make sure we have the right power settings
-  setPowerConfig();                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
+  setPowerConfig(true);                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
 
   // Done with the System Stuff - now we will focus on the current counts values
   if (current.hourlyCount) lastReportedTime = current.lastCountTime;
@@ -394,7 +393,6 @@ void loop()
   case IDLE_STATE:                                                     // Where we spend most time - note, the order of these conditionals is important
     if (state != oldState) publishStateTransition();
     if (sysStatus.lowPowerMode && (millis() - stayAwakeTimeStamp) > stayAwake) state = NAPPING_STATE;         // When in low power mode, we can nap between taps
-    if (firmwareUpdateInProgress) state= FIRMWARE_UPDATE;                                                     // This means there is a firemware update on deck
     if (Time.hour() != Time.hour(lastReportedTime)) state = REPORTING_STATE;                                  // We want to report on the hour but not after bedtime
     if ((Time.hour() >= sysStatus.closeTime) || (Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
     break;
@@ -504,7 +502,7 @@ void loop()
         break;                                                         // Leave this state and go connect - will return only if we are successful in connecting
       }
     }
-    break;
+  break;
 
   case RESP_WAIT_STATE: {
     static unsigned long webhookTimeStamp = 0;                         // Webhook time stamp
@@ -521,7 +519,7 @@ void loop()
       currentCountsWriteNeeded = true;
       state = ERROR_STATE;                                             // Go to the ERROR state to decide our fate
     }
-    } break;
+  } break;
 
   case CONNECTING_STATE:{                                              // Will connect - or not and head back to the Idle state
     static State retainedOldState;                                     // Keep track for where to go next (depends on whether we were called from Reporting)
@@ -547,11 +545,6 @@ void loop()
         Particle.syncTime();                                           // Set the clock each day
         publishCellularInformation();                                  // Publish device cellular information once a day as well
       }
-      if (current.currentConnectionLimit != 180) {                     // If we have reset due to connection speed, we need to add these back in
-        if (current.currentConnectionLimit >= 300) sysStatus.lastConnectionDuration += 180;
-        if (current.currentConnectionLimit == 420) sysStatus.lastConnectionDuration += 300;
-      }
-      current.currentConnectionLimit = 180;                            // Successful connection - resetting the connection timer
       sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
       stayAwake = stayAwakeLong;                                       // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
@@ -565,33 +558,16 @@ void loop()
       if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode
     }
     else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) {
-      Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
-      currentCountsWriteNeeded = true;                                 // Record in FRAM as we will soon reset
-      state = ERROR_STATE;                                             // Note - not setting the ERROR timestamp to make this go quickly
-      switch (current.currentConnectionLimit) {
-        case (180):                                                    // A connection limit of 180 indicates that this is a new attempt
-          current.currentConnectionLimit = 300;                        // Increment the limit to the next value
-          current.alerts = 32;                                         // Indicates we will reset and keep trying
-          Log.info("3 Minute connection time exceeded - resetting");
-          break; 
-        case (300): 
-          current.currentConnectionLimit = 420;                        // Increment the limit to the next value
-          current.alerts = 32;                                         // Indicates we will reset and keep trying
-          Log.info("5 Minute connection time exceeded - resetting");
-          break;  
-        case (420):
-          current.currentConnectionLimit = 180;                        // Giving up - we are not going to connect this hour - reset for next
-          current.alerts = 31;                                         // Indicates we are done with this attempt
-          if (!sysStatus.lowPowerMode) current.backOff = true;         // If not in low power mode - wait till next hour before connecting
-          Log.info("7 Minute connection time exceeded - giving up");
-          break;                              
-      }
-      if (Cellular.ready()) {                                          // We connected to the cellular network but not to Particle
-        Log.info("Connected to cellular but not Particle");
-        current.alerts = 30;                                           // Record alert for timeout on Particle but connected to cellular
-      }
+        if (Cellular.ready()) {                                         // We connected to the cellular network but not to Particle
+          Log.info("Connected to cellular but not Particle");
+          current.alerts = 30;                                          // Record alert for timeout on Particle but connected to cellular
+        }
+        Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
+        currentCountsWriteNeeded = true;                                // Record in FRAM as we will soon reset
+        Log.info("7 Minute connection time exceeded - giving up");
+        break;                              
     }
-   } break;
+  } break;
 
   case ERROR_STATE: {                                                  // New and improved - now looks at the alert codes
     if (state != oldState) publishStateTransition();                   // We will apply the back-offs before sending to ERROR state - so if we are here we will take action
@@ -657,31 +633,8 @@ void loop()
       }
     }
     } break;
-
-  case FIRMWARE_UPDATE: {
-      static unsigned long stateTime;
-      char data[64];
-
-      if (state != oldState) {
-        stateTime = millis();                                          // When did we start the firmware update?
-        Log.info("In the firmware update state");
-        publishStateTransition();
-      }
-      if (!firmwareUpdateInProgress) {                                 // Done with the update
-          Log.info("firmware update completed");
-          state = IDLE_STATE;
-      }
-      else
-      if (millis() - stateTime >= firmwareUpdateMaxTime.count()) {     // Ran out of time
-          Log.info("firmware update timed out");
-          current.alerts = 21;                                          // Record alert for timeout
-          snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
-          PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE);
-          current.updateAttempts++;                                    // Increment the update attempt counter
-          state = IDLE_STATE;
-      }
-    } break;
   }
+
   // Take care of housekeeping items here
 
   if (sensorDetect) recordCount();                                     // The ISR had raised the sensor flag - this will service interrupts regardless of state
@@ -829,6 +782,7 @@ void publishToGoogleSheets() {
 
 }
 
+
 /**
  * @brief This function publishes deviceVitals data that can be used to show were the device is on a map and what the signal strength is
  * 
@@ -872,42 +826,6 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
   }
 }
 
-/**
- * @brief The Firmware update handler tracks changes in the firmware update status
- *
- * @details This handler is subscribed to in setup with System.on event and sets the firmwareUpdateinProgress flag that
- * will trigger a state transition to the Firmware update state.  As some events are only see in this handler, failure
- * and success success codes are assigned here and the time out code in the main loop state.
- *
- * @param event  - Firmware update
- * @param param - Specific firmware update state
- */
-
-void firmwareUpdateHandler(system_event_t event, int param) {
-  switch(param) {
-    char data[64];                                                     // Store the date in this character array - not global
-
-    case firmware_update_begin:
-      firmwareUpdateInProgress = true;
-      break;
-    case firmware_update_complete:
-      firmwareUpdateInProgress = false;
-      current.alerts = 20;                                             // Record a successful attempt
-      snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
-      PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publish queue
-      current.updateAttempts = 0;                                      // Zero the update attempts counter
-      break;
-    case firmware_update_failed:
-      firmwareUpdateInProgress = false;
-      current.alerts = 22;                                             // Record a failed attempt
-      snprintf(data, sizeof(data), "{\"alerts\":%i,\"timestamp\":%lu000 }",current.alerts, Time.now());
-      PublishQueuePosix::instance().publish("Ubidots_Alert_Hook", data, PRIVATE); // Put in publlish queue
-      current.updateAttempts++;                                        // Increment the update attempts counter
-      break;
-  }
-  currentCountsWriteNeeded = true;
-}
-
 // These are the functions that are part of the takeMeasurements call
 void takeMeasurements()
 {
@@ -916,11 +834,6 @@ void takeMeasurements()
   sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
 
   isItSafeToCharge();                                                  // See if it is safe to charge
-
-  if (sysStatus.lowPowerMode) {                                        // Need to take these steps if we are sleeping
-    fuelGauge.quickStart();                                            // May help us re-establish a baseline for SoC
-    delay(500);
-  }
 
   sysStatus.stateOfCharge = int(fuelGauge.getSoC());                   // Assign to system value
 
@@ -943,21 +856,6 @@ void takeMeasurements()
   systemStatusWriteNeeded = true;
 }
 
-bool isItSafeToCharge()                                                // Returns a true or false if the battery is in a safe charging range.
-{
-  PMIC pmic(true);
-  if (current.temperature < 36 || current.temperature > 100 )  {       // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
-    pmic.disableCharging();                                            // It is too cold or too hot to safely charge the battery
-    sysStatus.batteryState = 1;                                        // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
-    current.alerts = 10;                                                // Set a value of 1 indicating that it is not safe to charge due to high / low temps
-    return false;
-  }
-  else {
-    pmic.enableCharging();                                             // It is safe to charge the battery
-    if (current.alerts == 10) current.alerts = 0;                      // Reset the alerts flag if we previously had disabled charging
-    return true;
-  }
-}
 
 void getSignalStrength() {
   const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
@@ -991,6 +889,58 @@ int getTemperature() {                                                // Get tem
 }
 
 
+bool isItSafeToCharge()                                                // Returns a true or false if the battery is in a safe charging range.
+{
+  if (current.temperature < 36 || current.temperature > 100 )  {       // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
+    setPowerConfig(false);                                            // Disables charging
+    sysStatus.batteryState = 1;                                        // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
+    current.alerts = 10;                                                // Set a value of 1 indicating that it is not safe to charge due to high / low temps
+    return false;
+  }
+  else {
+    setPowerConfig(true);
+    if (current.alerts == 10) current.alerts = 0;                      // Reset the alerts flag if we previously had disabled charging
+    return true;
+  }
+  
+ return true;
+}
+
+
+// Power Management function
+int setPowerConfig(bool enableCharging) {
+  SystemPowerConfiguration conf;
+  System.setPowerConfiguration(SystemPowerConfiguration());            // To restore the default configuration
+
+  if (!enableCharging) {
+    conf.feature(SystemPowerFeature::DISABLE_CHARGING);
+    int res = System.setPowerConfiguration(conf);
+    return res;
+  }
+  else if (sysStatus.solarPowerMode) {
+    conf.powerSourceMaxCurrent(900)                                    // Set maximum current the power source can provide (applies only when powered through VIN)
+        .powerSourceMinVoltage(5080)                                   // Set minimum voltage the power source can provide (applies only when powered through VIN)
+        .batteryChargeCurrent(900)                                     // Set battery charge current
+        .batteryChargeVoltage(4208)                                    // Set battery termination voltage
+        .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST);  // For the cases where the device is powered through VIN
+                                                                       // but the USB cable is connected to a USB host, this feature flag
+                                                                       // enforces the voltage/current limits specified in the configuration
+                                                                       // (where by default the device would be thinking that it's powered by the USB Host)
+    int res = System.setPowerConfiguration(conf);                      // returns SYSTEM_ERROR_NONE (0) in case of success
+    return res;
+  }
+  else  {
+    conf.powerSourceMaxCurrent(900)                                   // default is 900mA
+        .powerSourceMinVoltage(4208)                                  // This is the default value for the Boron
+        .batteryChargeCurrent(900)                                    // higher charge current from DC-IN when not solar powered
+        .batteryChargeVoltage(4112)                                   // default is 4.112V termination voltage
+        .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST) ;
+    int res = System.setPowerConfiguration(conf);                     // returns SYSTEM_ERROR_NONE (0) in case of success
+    return res;
+  }
+}
+
+
 // Here are the various hardware and timer interrupt service routines
 void outOfMemoryHandler(system_event_t event, int param) {
     outOfMemory = param;
@@ -1015,32 +965,6 @@ void countSignalTimerISR() {
   digitalWrite(blueLED,LOW);
 }
 
-// Power Management function
-int setPowerConfig() {
-  SystemPowerConfiguration conf;
-  System.setPowerConfiguration(SystemPowerConfiguration());            // To restore the default configuration
-  if (sysStatus.solarPowerMode) {
-    conf.powerSourceMaxCurrent(900)                                    // Set maximum current the power source can provide (applies only when powered through VIN)
-        .powerSourceMinVoltage(5080)                                   // Set minimum voltage the power source can provide (applies only when powered through VIN)
-        .batteryChargeCurrent(900)                                     // Set battery charge current
-        .batteryChargeVoltage(4208)                                    // Set battery termination voltage
-        .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST);  // For the cases where the device is powered through VIN
-                                                                       // but the USB cable is connected to a USB host, this feature flag
-                                                                       // enforces the voltage/current limits specified in the configuration
-                                                                       // (where by default the device would be thinking that it's powered by the USB Host)
-    int res = System.setPowerConfiguration(conf);                      // returns SYSTEM_ERROR_NONE (0) in case of success
-    return res;
-  }
-  else  {
-    conf.powerSourceMaxCurrent(900)                                   // default is 900mA
-        .powerSourceMinVoltage(4208)                                  // This is the default value for the Boron
-        .batteryChargeCurrent(900)                                    // higher charge current from DC-IN when not solar powered
-        .batteryChargeVoltage(4112)                                   // default is 4.112V termination voltage
-        .feature(SystemPowerFeature::USE_VIN_SETTINGS_WITH_USB_HOST) ;
-    int res = System.setPowerConfiguration(conf);                     // returns SYSTEM_ERROR_NONE (0) in case of success
-    return res;
-  }
-}
 
 
 void loadSystemDefaults() {                                           // Default settings for the device - connected, not-low power and always on
@@ -1086,16 +1010,6 @@ void checkSystemValues() {                                          // Checks to
     delay(3000);
     Log.info("resetting the SIM card");
     sysStatus.verizonSIM = 0; // Default to non-Verizon SIM
-  }
-
-  if (current.currentConnectionLimit != 180 && current.currentConnectionLimit != 300 && current.currentConnectionLimit != 420) {
-    current.currentConnectionLimit = 180;
-    currentCountsWriteNeeded = true;
-  }
-
-  if (current.backOff != true && current.backOff != false) {
-    current.backOff = false;
-    currentCountsWriteNeeded = true;
   }
 
   // None for lastHookResponse
@@ -1209,7 +1123,6 @@ int sendNow(String command) // Function to force sending data in current hour
 {
   if (command == "1")
   {
-    publishToGoogleSheets();                                         // Send data to Google Sheets on Product Status
     publishCellularInformation();
     state = REPORTING_STATE;
     return 1;
@@ -1248,7 +1161,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
   if (command == "1")
   {
     sysStatus.solarPowerMode = true;
-    setPowerConfig();                                               // Change the power management Settings
+    setPowerConfig(true);                                               // Change the power management Settings
     systemStatusWriteNeeded=true;
     if (Particle.connected()) Particle.publish("Mode","Set Solar Powered Mode", PRIVATE);
     return 1;
@@ -1257,7 +1170,7 @@ int setSolarMode(String command) // Function to force sending data in current ho
   {
     sysStatus.solarPowerMode = false;
     systemStatusWriteNeeded=true;
-    setPowerConfig();                                                // Change the power management settings
+    setPowerConfig(true);                                                // Change the power management settings
     if (Particle.connected()) Particle.publish("Mode","Cleared Solar Powered Mode", PRIVATE);
     return 1;
   }
