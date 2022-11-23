@@ -121,10 +121,12 @@
         //  - getting rid of the complexity of back-offs
 //v47.00 - Recompiled for deviceOS@4.0.1 to fix connectivity issues.
 //v48.00 - Updated to address issue with Error 30 assignment by mistake
+//v49.00 - Fixed issue that could cause device to get stuck if not connected
+//v50.00 - Fixed issue where new devices would have a connectiion time of 0
 
 // Particle Product definitions
-PRODUCT_VERSION(48);
-char currentPointRelease[6] ="48.00";
+PRODUCT_VERSION(50);
+char currentPointRelease[6] ="50.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -323,7 +325,7 @@ void setup()                                        // Note: Disconnected Setup(
   // Take note if we are restarting due to a pin reset - either by the user or the watchdog - could be sign of trouble
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
-    if (sysStatus.resetCount > 6) current.alerts = 13;                 // Excessive resets
+    if (sysStatus.resetCount > 8) current.alerts = 13;                 // Excessive resets - increased to 8 due to back off resets
   }
 
   // Publish Queue Posix is used exclusively for sending webhooks and update alerts in order to conserve RAM and reduce writes / wear
@@ -545,6 +547,11 @@ void loop()
         Particle.syncTime();                                           // Set the clock each day
         publishCellularInformation();                                  // Publish device cellular information once a day as well
       }
+      if (current.currentConnectionLimit != 180) {                     // If we have reset due to connection speed, we need to add these back in
+        if (current.currentConnectionLimit >= 300) sysStatus.lastConnectionDuration += 180;
+        if (current.currentConnectionLimit == 420) sysStatus.lastConnectionDuration += 300;
+      }
+       current.currentConnectionLimit = 180;                            // Successful connection - resetting the connection timer
       sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
       stayAwake = stayAwakeLong;                                       // Keeps device awake after reboot - helps with recovery
       stayAwakeTimeStamp = millis();
@@ -558,14 +565,31 @@ void loop()
       if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode
     }
     else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) {
-        if (Cellular.ready()) {                                         // We connected to the cellular network but not to Particle
-          Log.info("Connected to cellular but not Particle");
-          current.alerts = 30;                                          // Record alert for timeout on Particle but connected to cellular
-        }
-        Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
-        currentCountsWriteNeeded = true;                                // Record in FRAM as we will soon reset
-        Log.info("7 Minute connection time exceeded - giving up");
-        break;                              
+      Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
+      currentCountsWriteNeeded = true;                                 // Record in FRAM as we will soon reset
+      state = ERROR_STATE;                                             // Note - not setting the ERROR timestamp to make this go quickly
+      switch (current.currentConnectionLimit) {
+        case (180):                                                    // A connection limit of 180 indicates that this is a new attempt
+          current.currentConnectionLimit = 300;                        // Increment the limit to the next value
+          current.alerts = 32;                                         // Indicates we will reset and keep trying
+          Log.info("3 Minute connection time exceeded - resetting");
+          break; 
+        case (300): 
+          current.currentConnectionLimit = 420;                        // Increment the limit to the next value
+          current.alerts = 32;                                         // Indicates we will reset and keep trying
+          Log.info("5 Minute connection time exceeded - resetting");
+          break;  
+       case (420):
+          current.currentConnectionLimit = 180;                        // Giving up - we are not going to connect this hour - reset for next
+          current.alerts = 31;                                         // Indicates we are done with this attempt
+          if (!sysStatus.lowPowerMode) current.backOff = true;         // If not in low power mode - wait till next hour before connecting
+          Log.info("7 Minute connection time exceeded - giving up");
+          break;                              
+       }
+       if (Cellular.ready()) {                                          // We connected to the cellular network but not to Particle
+         Log.info("Connected to cellular but not Particle");
+         current.alerts = 30;                                           // Record alert for timeout on Particle but connected to cellular
+       }
     }
   } break;
 
@@ -1011,6 +1035,7 @@ void checkSystemValues() {                                          // Checks to
     Log.info("resetting the SIM card");
     sysStatus.verizonSIM = 0; // Default to non-Verizon SIM
   }
+  if (current.currentConnectionLimit < 180) current.currentConnectionLimit = 180;
 
   // None for lastHookResponse
   systemStatusWriteNeeded = true;
