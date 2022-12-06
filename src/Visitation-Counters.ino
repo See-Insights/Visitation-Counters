@@ -127,7 +127,7 @@
 //v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet.
 
 // Particle Product definitions
-PRODUCT_VERSION(51);
+PRODUCT_VERSION(52);
 char currentPointRelease[6] ="52.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
