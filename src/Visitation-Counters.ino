@@ -123,10 +123,12 @@
 //v48.00 - Updated to address issue with Error 30 assignment by mistake
 //v49.00 - Fixed issue that could cause device to get stuck if not connected
 //v50.00 - Fixed issue where new devices would have a connectiion time of 0
+//v51.00 - Added an upper bound check on the connection time limit, set connection time limit in set defaults, modified verbose mode (publish / time limit)
+//v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet.
 
 // Particle Product definitions
-PRODUCT_VERSION(50);
-char currentPointRelease[6] ="50.00";
+PRODUCT_VERSION(51);
+char currentPointRelease[6] ="52.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -476,6 +478,7 @@ void loop()
     takeMeasurements();                                                // Take Measurements here for reporting
     if (Time.hour() == sysStatus.openTime) dailyCleanup();             // Once a day, clean house and publish to Google Sheets
     sendEvent();                                                       // Publish hourly but not at opening time as there is nothing to publish
+    setVerboseMode("0");
     state = CONNECTING_STATE;                                          // Default behaviour would be to connect and send report to Ubidots
 
     // Let's see if we need to connect 
@@ -523,7 +526,7 @@ void loop()
     }
   } break;
 
-  case CONNECTING_STATE:{                                              // Will connect - or not and head back to the Idle state
+  case CONNECTING_STATE:{                                              // Will connect - or not and head back to the Idle state - We are using a 3,5, 7 minute back-off approach as recommended by Particle
     static State retainedOldState;                                     // Keep track for where to go next (depends on whether we were called from Reporting)
     static unsigned long connectionStartTimeStamp;                     // Time in Millis that helps us know how long it took to connect
     char data[64];                                                     // Holder for message strings
@@ -531,10 +534,10 @@ void loop()
     if (state != oldState) {                                           // Non-blocking function - these are first time items
       Log.info("Initializing connection with a limit of %i", current.currentConnectionLimit);
       retainedOldState = oldState;                                     // Keep track for where to go next
-      sysStatus.lastConnectionDuration = 0;                            // Will exit with 0 if we do not connect or are connected or the connection time if we do
+      sysStatus.lastConnectionDuration = 0;                            // Will exit with 0 if we do not connect or are already connected.  If we need to connect, this will record connection time.
       publishStateTransition();
-      connectionStartTimeStamp = millis();                             // Have to use millis as the clock will get reset on connect
-      Particle.connect();                                              // Told the Particle to connect, now we need to wait
+      connectionStartTimeStamp = millis();                             // Have to use millis as the clock may get reset on connect
+      Particle.connect();                                              // Tells Particle to connect, now we need to wait
     }
 
     sysStatus.lastConnectionDuration = int((millis() - connectionStartTimeStamp)/1000);
@@ -551,20 +554,20 @@ void loop()
         if (current.currentConnectionLimit >= 300) sysStatus.lastConnectionDuration += 180;
         if (current.currentConnectionLimit == 420) sysStatus.lastConnectionDuration += 300;
       }
-       current.currentConnectionLimit = 180;                            // Successful connection - resetting the connection timer
-      sysStatus.lastConnection = Time.now();                           // This is the last time we attempted to connect
-      stayAwake = stayAwakeLong;                                       // Keeps device awake after reboot - helps with recovery
-      stayAwakeTimeStamp = millis();
-      if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest each day
-      getSignalStrength();                                             // Test signal strength if the cellular modem is on and ready
-      snprintf(data, sizeof(data),"Connected in %i secs",sysStatus.lastConnectionDuration);                   // Make up connection string and publish
+      current.currentConnectionLimit = 180;                            // Successful connection - resetting the connection timer
+      sysStatus.lastConnection = Time.now();                           // This is the last time we last connected
+      stayAwake = stayAwakeLong;                                       // Keeps device awake after reconnection - allows us some time to catch the device before it sleeps
+      stayAwakeTimeStamp = millis();                                   // Start the stay awake timer now
+      if (sysStatus.lastConnectionDuration > current.maxConnectTime) current.maxConnectTime = sysStatus.lastConnectionDuration; // Keep track of longest connection attempt each day
+      getSignalStrength();                                             // Test signal strength since the cellular modem is on and ready
+      snprintf(data, sizeof(data),"Connected in %i secs",sysStatus.lastConnectionDuration);  // Make up connection string and publish
       Log.info(data);
       if (sysStatus.verboseMode) Particle.publish("Cellular",data,PRIVATE);
-      attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable sending connection details
-      (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE;
-      if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode
+      attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable more verbose details if we are connected and the User button is pressed
+      (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE; // so, if we are connecting to report - next step is response wait - otherwise IDLE
+      if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode (Verizon has a shorter keep alive)
     }
-    else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) {
+    else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) { // What happens if we do not connect
       Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
       currentCountsWriteNeeded = true;                                 // Record in FRAM as we will soon reset
       state = ERROR_STATE;                                             // Note - not setting the ERROR timestamp to make this go quickly
@@ -857,11 +860,9 @@ void takeMeasurements()
 
   sysStatus.batteryState = System.batteryState();                      // Call before isItSafeToCharge() as it may overwrite the context
 
-  isItSafeToCharge();                                                  // See if it is safe to charge
-
   sysStatus.stateOfCharge = int(fuelGauge.getSoC());                   // Assign to system value
 
-  if (sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {
+  if (isItSafeToCharge() && sysStatus.stateOfCharge < 65 && sysStatus.batteryState == 1) {  // This is an issue - it is safe to charge, the battery needs charging and yet there is no charging (not this is different than discharging)
     System.setPowerConfiguration(SystemPowerConfiguration());          // Reset the PMIC
     current.alerts = 11;                                               // Keep track of this
   }
@@ -913,12 +914,12 @@ int getTemperature() {                                                // Get tem
 }
 
 
-bool isItSafeToCharge()                                                // Returns a true or false if the battery is in a safe charging range.
+bool isItSafeToCharge()                                               // Returns a true or false if the battery is in a safe charging range.
 {
-  if (current.temperature < 36 || current.temperature > 100 )  {       // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
+  if (current.temperature < 36 || current.temperature > 100 )  {      // Reference: https://batteryuniversity.com/learn/article/charging_at_high_and_low_temperatures (32 to 113 but with safety)
     setPowerConfig(false);                                            // Disables charging
-    sysStatus.batteryState = 1;                                        // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
-    current.alerts = 10;                                                // Set a value of 1 indicating that it is not safe to charge due to high / low temps
+    sysStatus.batteryState = 1;                                       // Overwrites the values from the batteryState API to reflect that we are "Not Charging"
+    current.alerts = 10;                                              // Set a value of 1 indicating that it is not safe to charge due to high / low temps
     return false;
   }
   else {
@@ -1011,6 +1012,9 @@ void loadSystemDefaults() {                                           // Default
   sysStatus.solarPowerMode = true;
   sysStatus.lastConnectionDuration = 0;                               // New measure
   fram.put(FRAM::systemStatusAddr,sysStatus);                         // Write it now since this is a big deal and I don't want values over written
+
+  current.currentConnectionLimit = 180;
+  fram.put(FRAM::currentCountsAddr,current);
 }
 
  /**
@@ -1035,7 +1039,7 @@ void checkSystemValues() {                                          // Checks to
     Log.info("resetting the SIM card");
     sysStatus.verizonSIM = 0; // Default to non-Verizon SIM
   }
-  if (current.currentConnectionLimit < 180) current.currentConnectionLimit = 180;
+  if (current.currentConnectionLimit < 180 || current.currentConnectionLimit > 420) current.currentConnectionLimit = 180;
 
   // None for lastHookResponse
   systemStatusWriteNeeded = true;
@@ -1262,20 +1266,29 @@ int setSensorType(String command)                                     // Functio
 /**
  * @brief Turns on/off verbose mode.
  *
- * @details Extracts the integer command. Turns on verbose mode if the command is "1" and turns
+ * @details Extracts the integer command. Turns on verbose counts mode if command is "2", verbose mode if the command is "1" and turns
  * off verbose mode if the command is "0".
  *
  * @param command A string with the integer command indicating to turn on or off verbose mode.
- * Only values of "0" or "1" are accepted. Values outside this range will cause the function
+ * Only values of "0", "1" or "2" are accepted. Values outside this range will cause the function
  * to return 0 to indicate an invalid entry.
  *
  * @return 1 if successful, 0 if invalid command
  */
 int setVerboseMode(String command) // Function to force sending data in current hour
 {
+  if (command == "2")
+  {
+    sysStatus.verboseMode = true;
+    sysStatus.verboseCounts = true;
+    systemStatusWriteNeeded = true;
+    if (Particle.connected()) Particle.publish("Mode","Set Verbose Counts Mode - resets at top of hour", PRIVATE);
+    return 1;
+  }
   if (command == "1")
   {
     sysStatus.verboseMode = true;
+    sysStatus.verboseCounts = false;
     systemStatusWriteNeeded = true;
     if (Particle.connected()) Particle.publish("Mode","Set Verbose Mode", PRIVATE);
     return 1;
@@ -1283,6 +1296,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
   else if (command == "0")
   {
     sysStatus.verboseMode = false;
+    sysStatus.verboseCounts = false;
     systemStatusWriteNeeded = true;
     if (Particle.connected()) Particle.publish("Mode","Cleared Verbose Mode", PRIVATE);
     return 1;
