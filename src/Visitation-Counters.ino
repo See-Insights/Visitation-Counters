@@ -124,7 +124,7 @@
 //v49.00 - Fixed issue that could cause device to get stuck if not connected
 //v50.00 - Fixed issue where new devices would have a connectiion time of 0
 //v51.00 - Added an upper bound check on the connection time limit, set connection time limit in set defaults, modified verbose mode (publish / time limit)
-//v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet.
+//v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet. Checks for Verbose before turning off feature
 
 // Particle Product definitions
 PRODUCT_VERSION(52);
@@ -478,7 +478,7 @@ void loop()
     takeMeasurements();                                                // Take Measurements here for reporting
     if (Time.hour() == sysStatus.openTime) dailyCleanup();             // Once a day, clean house and publish to Google Sheets
     sendEvent();                                                       // Publish hourly but not at opening time as there is nothing to publish
-    setVerboseMode("0");
+    if (sysStatus.verboseMode) setVerboseMode("0");
     state = CONNECTING_STATE;                                          // Default behaviour would be to connect and send report to Ubidots
 
     // Let's see if we need to connect 
@@ -594,6 +594,7 @@ void loop()
          current.alerts = 30;                                           // Record alert for timeout on Particle but connected to cellular
        }
     }
+    else {} // We go round the main loop again
   } break;
 
   case ERROR_STATE: {                                                  // New and improved - now looks at the alert codes
@@ -1100,7 +1101,7 @@ bool disconnectFromParticle()                                          // Ensure
   Particle.disconnect();                                               // Disconnect from Particle
   waitForNot(Particle.connected, 15000);                               // Up to a 15 second delay() 
   Particle.process();
-  if (Particle.connected()) {                      // As this disconnect from Particle thing can be a·syn·chro·nous, we need to take an extra step to wait, 
+  if (Particle.connected()) {                                          // As this disconnect from Particle thing can be a·syn·chro·nous, we need to take an extra step to wait, 
     Log.info("Failed to disconnect from Particle");
     return(false);
   }
