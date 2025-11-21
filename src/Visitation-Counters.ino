@@ -127,19 +127,20 @@
 //v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet. Checks for Verbose before turning off feature
 //v53.00 - Starting a new branch and making changes for parking lot monitor mode - First task - add Particle function and variable
 //v53.01 - changing napping behaviour if parking lot mode is enabled and the battery charge level is over 50%
+//v53.02 - Forcing the counter to report on every car that is counted.
 
 
 // To-do list to add a "Parking Lot Mode"
 // Updated base OS to 6.3.3 
 // 1) Add a particle function and variable and provide a way to add the mode value to the sysStatus structure (Repurposing verizonSIM) - Done - v53.00
 // 2) Change napping behaviour to support Keep network alive - Done - v53.01
-// 3) Change to support report on change in count.
+// 3) Change to support report on change in count. - Done - v53.02
 
 
 
 // Particle Product definitions
 PRODUCT_VERSION(53);
-char currentPointRelease[6] ="53.01";
+char currentPointRelease[6] ="53.02";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -686,7 +687,13 @@ void loop()
 
   // Take care of housekeeping items here
 
-  if (sensorDetect) recordCount();                                     // The ISR had raised the sensor flag - this will service interrupts regardless of state
+  if (sensorDetect) {
+    recordCount();                                                    // The ISR had raised the sensor flag - this will service interrupts regardless of state
+    if (sysStatus.parkingLotMode) {                                   // In parking lot mode we want to report each time there is a count
+      state = REPORTING_STATE;                                        // Go report the count right away
+    }
+  }
+
 
   if (userSwitchDetect) {                                              // If connected, this will trigger publishing the device location and cellular signal strength
     userSwitchDetect = false;
