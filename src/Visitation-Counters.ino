@@ -126,18 +126,20 @@
 //v51.00 - Added an upper bound check on the connection time limit, set connection time limit in set defaults, modified verbose mode (publish / time limit)
 //v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet. Checks for Verbose before turning off feature
 //v53.00 - Starting a new branch and making changes for parking lot monitor mode - First task - add Particle function and variable
+//v53.01 - changing napping behaviour if parking lot mode is enabled and the battery charge level is over 50%
+
 
 // To-do list to add a "Parking Lot Mode"
 // Updated base OS to 6.3.3 
 // 1) Add a particle function and variable and provide a way to add the mode value to the sysStatus structure (Repurposing verizonSIM) - Done - v53.00
-// 2) Change napping behaviour to support Keep network alive
+// 2) Change napping behaviour to support Keep network alive - Done - v53.01
 // 3) Change to support report on change in count.
 
 
 
 // Particle Product definitions
 PRODUCT_VERSION(53);
-char currentPointRelease[6] ="53.00";
+char currentPointRelease[6] ="53.01";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -465,10 +467,24 @@ void loop()
     state = IDLE_STATE;                                                // Back to the IDLE_STATE after a nap - not enabling updates here as napping is typicallly disconnected
     ab1805.stopWDT();                                                  // If we are sleeping, we will miss petting the watchdog
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
-    config.mode(SystemSleepMode::ULTRA_LOW_POWER)
+    // Adding code here to support napping for the parking lot mode.  This is important as the device will report after every car is counted.
+    // keeping the network connection alive will reduce the time to report, reduce power usage and prevent the Telco for blacklisting the counter for too frequent reconnects
+    if (sysStatus.stateOfCharge > 50 && sysStatus.parkingLotMode) {                                // Will stay on network standby if we have the power
+      config.mode(SystemSleepMode::ULTRA_LOW_POWER)
+      .gpio(userSwitch,CHANGE)
+      .gpio(intPin,RISING)
+      .duration(wakeInSeconds * 1000)
+      .network(NETWORK_INTERFACE_CELLULAR, SystemSleepNetworkFlag::INACTIVE_STANDBY);           // Not sure how long we will sleep so need to keep the network active - 14mA power 
+      if (Particle.connected()) Particle.disconnect();                // Disconnects from Particle but not from the cellular network
+    }
+    else {                                                            // Else we will drop off the network
+      config.mode(SystemSleepMode::ULTRA_LOW_POWER)
       .gpio(userSwitch,CHANGE)
       .gpio(intPin,RISING)
       .duration(wakeInSeconds * 1000);
+      if (Particle.connected() || Cellular.isOn()) disconnectFromParticle();  // This will turn off the cellular radio
+    }
+    // Completed change
     SystemSleepResult result = System.sleep(config);                   // Put the device to sleep
     ab1805.resumeWDT();                                                // Wakey Wakey - WDT can resume
     fuelGauge.wakeup();                                                // Make sure the fuelGauge is woke
