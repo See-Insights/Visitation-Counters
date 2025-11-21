@@ -125,10 +125,19 @@
 //v50.00 - Fixed issue where new devices would have a connectiion time of 0
 //v51.00 - Added an upper bound check on the connection time limit, set connection time limit in set defaults, modified verbose mode (publish / time limit)
 //v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet. Checks for Verbose before turning off feature
+//v53.00 - Starting a new branch and making changes for parking lot monitor mode - First task - add Particle function and variable
+
+// To-do list to add a "Parking Lot Mode"
+// Updated base OS to 6.3.3 
+// 1) Add a particle function and variable and provide a way to add the mode value to the sysStatus structure (Repurposing verizonSIM) - Done - v53.00
+// 2) Change napping behaviour to support Keep network alive
+// 3) Change to support report on change in count.
+
+
 
 // Particle Product definitions
-PRODUCT_VERSION(52);
-char currentPointRelease[6] ="52.00";
+PRODUCT_VERSION(53);
+char currentPointRelease[6] ="53.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -175,7 +184,6 @@ const std::chrono::milliseconds firmwareUpdateMaxTime = 10min; // Set at least 5
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                        // This will enable user code to start executing automatically.
-SYSTEM_THREAD(ENABLED);                             // Means my code will not be held up by Particle processes.
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 SystemSleepConfiguration config;                    // Initialize new Sleep 2.0 Api
 MB85RC64 fram(Wire, 0);                             // Rickkas' FRAM library
@@ -226,7 +234,7 @@ bool firmwareUpdateInProgress = false;              // Helps us track if a firmw
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 char batteryContextStr[16];                         // Tracks the battery context
 char lowPowerModeStr[16];                           // In low power mode?
-char simCardStr[12];
+char countModeStr[14];                              // What is our current counting mode
 char openTimeStr[8]="NA";                           // Park Open Time
 char closeTimeStr[8]="NA";                          // Park close Time
 char sensorTypeConfigStr[16];
@@ -259,7 +267,7 @@ void setup()                                        // Note: Disconnected Setup(
   char responseTopic[125];
   String deviceID = System.deviceID();              // Multiple devices share the same hook - keeps things straight
   deviceID.toCharArray(responseTopic,125);          // Puts the deviceID into the response topic array
-  Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
+  Particle.subscribe(responseTopic, UbidotsHandler);      // Subscribe to the integration response event
   System.on(out_of_memory, outOfMemoryHandler);     // Enabling an out of memory handler is a good safety tip. If we run out of memory a System.reset() is done.
 
   Particle.variable("HourlyCount", current.hourlyCount);                // Define my Particle variables
@@ -276,7 +284,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("TimeOffset",currentOffsetStr);
   Particle.variable("BatteryContext",batteryContextMessage);
   Particle.variable("SensorStatus",sensorTypeConfigStr);
-  Particle.variable("SIM-Status", simCardStr);
+  Particle.variable("CountMode", countModeStr);
 
   Particle.function("setDailyCount", setDailyCount);                  // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
@@ -290,7 +298,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("Set-OpenTime",setOpenTime);
   Particle.function("Set-Close",setCloseTime);
   Particle.function("Set-SensorType",setSensorType);
-  Particle.function("setVerizonSIM",setVerizonSIM);
+  Particle.function("setParkingLotMode",setParkingLotMode);
 
   // Particle and System Set up next
   Particle.setDisconnectOptions(CloudDisconnectOptions().graceful(true).timeout(5s));  // Don't disconnect abruptly
@@ -321,8 +329,6 @@ void setup()                                        // Note: Disconnected Setup(
 
   // Now that the system object is loaded - let's make sure the values make sense
   checkSystemValues();                                                // Make sure System values are all in valid range
-
-  if (sysStatus.verizonSIM) Particle.keepAlive(60);                   // If we have a Verizon SIM, we need to issue this keep alive command
 
   // Take note if we are restarting due to a pin reset - either by the user or the watchdog - could be sign of trouble
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
@@ -565,7 +571,6 @@ void loop()
       if (sysStatus.verboseMode) Particle.publish("Cellular",data,PRIVATE);
       attachInterrupt(userSwitch, userSwitchISR,FALLING);              // Attach interrupt for the user switch to enable more verbose details if we are connected and the User button is pressed
       (retainedOldState == REPORTING_STATE) ? state = RESP_WAIT_STATE : state = IDLE_STATE; // so, if we are connecting to report - next step is response wait - otherwise IDLE
-      if (sysStatus.verizonSIM && !sysStatus.lowPowerMode) Particle.keepAlive(60);    // Keeps connection alive if we are not in low power mode (Verizon has a shorter keep alive)
     }
     else if (sysStatus.lastConnectionDuration > current.currentConnectionLimit) { // What happens if we do not connect
       Log.info("Current connection duration = %i while the current connection limit is %i", sysStatus.lastConnectionDuration, current.currentConnectionLimit);
@@ -804,7 +809,7 @@ void publishToGoogleSheets() {
   (sysStatus.solarPowerMode) ? strncpy(solarString,"Solar",sizeof(solarString)) : strncpy(solarString,"Utility",sizeof(solarString));
   (sysStatus.verboseMode) ? strncpy(verboseString, "Verbose",sizeof(verboseString)) : strncpy(verboseString, "Not Verbose",sizeof(verboseString));
 
-  snprintf(data, sizeof(data), "[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%i sec\",\"%i%%\",\"%s\"]", solarString, lowPowerModeStr, currentOffsetStr, openTimeStr, closeTimeStr, sensorTypeConfigStr, verboseString, current.maxConnectTime, current.minBatteryLevel,simCardStr);
+  snprintf(data, sizeof(data), "[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%i sec\",\"%i%%\",\"%s\"]", solarString, lowPowerModeStr, currentOffsetStr, openTimeStr, closeTimeStr, sensorTypeConfigStr, verboseString, current.maxConnectTime, current.minBatteryLevel,countModeStr);
   PublishQueuePosix::instance().publish("GoogleSheetsExport", data, PRIVATE | WITH_ACK);
   Log.info("Google Sheets: %s", data);
 
@@ -1035,11 +1040,7 @@ void checkSystemValues() {                                          // Checks to
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
-  if (sysStatus.verizonSIM != 0 && sysStatus.verizonSIM != 1) {
-    delay(3000);
-    Log.info("resetting the SIM card");
-    sysStatus.verizonSIM = 0; // Default to non-Verizon SIM
-  }
+  if (sysStatus.parkingLotMode != 0 && sysStatus.parkingLotMode != 1) sysStatus.parkingLotMode = 0; // Default to not parking lot mode
   if (current.currentConnectionLimit < 180 || current.currentConnectionLimit > 420) current.currentConnectionLimit = 180;
 
   // None for lastHookResponse
@@ -1076,8 +1077,8 @@ void makeUpStringMessages() {
   else if (sysStatus.sensorType == 1) strncpy(sensorTypeConfigStr,"PIR Sensor",sizeof(sensorTypeConfigStr));
   else strncpy(sensorTypeConfigStr,"Unknown Sensor",sizeof(sensorTypeConfigStr));
 
-  if (sysStatus.verizonSIM) strncpy(simCardStr,"Verizon", sizeof(simCardStr));
-  else strncpy(simCardStr,"Particle", sizeof(simCardStr));
+  if (sysStatus.parkingLotMode) strncpy(countModeStr,"Parking Lot", sizeof(countModeStr));
+  else strncpy(countModeStr,"Particle", sizeof(countModeStr));
 
   return;
 }
@@ -1207,24 +1208,22 @@ int setSolarMode(String command) // Function to force sending data in current ho
   else return 0;
 }
 
-int setVerizonSIM(String command)                                   // If we are using a Verizon SIM, we will need to execute "keepAlive" calls in the main loop when not in low power mode
+int setParkingLotMode(String command)                                   // If we are using a Verizon SIM, we will need to execute "keepAlive" calls in the main loop when not in low power mode
 {
   if (command == "1")
   {
-    sysStatus.verizonSIM = true;
+    sysStatus.parkingLotMode = true;
     systemStatusWriteNeeded = true;
-    Particle.keepAlive(60);                                         // send a ping every minute
     makeUpStringMessages();
-    if (Particle.connected()) Particle.publish("Mode","Set to Verizon SIM", PRIVATE);
+    if (Particle.connected()) Particle.publish("Mode","Set to parking lot mode", PRIVATE);
     return 1;
   }
   else if (command == "0")
   {
-    sysStatus.verizonSIM = false;
+    sysStatus.parkingLotMode = false;
     systemStatusWriteNeeded = true;
-    Particle.keepAlive(23 * 60);                                     // send a ping every 23 minutes
     makeUpStringMessages();
-    if (Particle.connected()) Particle.publish("Mode","Set to Particle SIM", PRIVATE);
+    if (Particle.connected()) Particle.publish("Mode","Set to visitation mode", PRIVATE);
     return 1;
   }
   else return 0;
@@ -1429,7 +1428,7 @@ int setLowPowerMode(String command)                                   // This is
     }
     else {
       waitUntil(meterParticlePublish);
-      Particle.publish("Mode",lowPowerModeStr, PRIVATE);
+      Particle.publish("PWR Mode",lowPowerModeStr, PRIVATE);
     }
   }
   systemStatusWriteNeeded = true;

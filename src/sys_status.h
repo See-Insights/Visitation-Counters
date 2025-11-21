@@ -23,7 +23,7 @@ struct systemStatus_structure {
   unsigned long lastConnection;                     // Last time we successfully connected to Particle
   uint16_t lastConnectionDuration;                  // How long - in seconds - did it take to last connect to the Particle cloud
   uint8_t sensorType;                               // What is the sensor type - 0-Pressure Sensor, 1-PIR Sensor
-  bool verizonSIM;                                  // Are we using a Verizon SIM?
+  bool parkingLotMode;                              // Are we using the counter to count cars in a parking lot (true) or people in a park (false - default)
 };
 
 extern struct systemStatus_structure sysStatus;
