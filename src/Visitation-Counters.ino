@@ -184,9 +184,9 @@ FuelGauge fuelGauge;                                // Needed to address issue w
 
 // For monitoring / debugging, you have some options on the next few lines
 SerialLogHandler logHandler(LOG_LEVEL_TRACE);
-//SerialLogHandler logHandler(LOG_LEVEL_ALL);         // All the loggings 
-// SerialLogHandler logHandler(LOG_LEVEL_INFO);     // Easier to see the program flow
-// Serial1LogHandler logHandler1(57600);            // This line is for when we are using the OTII ARC for power analysis
+//SerialLogHandler logHandler(LOG_LEVEL_ALL);        // All the loggings 
+// SerialLogHandler logHandler(LOG_LEVEL_INFO);      // Easier to see the program flow
+// Serial1LogHandler logHandler1(57600);             // This line is for when we are using the OTII ARC for power analysis
 
 // State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, SLEEPING_STATE, NAPPING_STATE, CONNECTING_STATE, REPORTING_STATE, RESP_WAIT_STATE, FIRMWARE_UPDATE};
@@ -196,7 +196,7 @@ State oldState = INITIALIZATION_STATE;
 
 // Battery Conect variables
 // Battery conect information - https://docs.particle.io/reference/device-os/firmware/boron/#batterystate-
-const char* batteryContext[7] = {"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Diconnected"};
+const char* batteryContext[7] = {"Unknown","Not Charging","Charging","Charged","Discharging","Fault","Disonnected"};
 
 // Pin Constants - Boron Carrier Board v1.x
 const int tmp36Pin =      A4;                       // Simple Analog temperature sensor - on the carrier board - inside the enclosure
