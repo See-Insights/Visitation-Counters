@@ -122,7 +122,7 @@
 //v47.00 - Recompiled for deviceOS@4.0.1 to fix connectivity issues.
 //v48.00 - Updated to address issue with Error 30 assignment by mistake
 //v49.00 - Fixed issue that could cause device to get stuck if not connected
-//v50.00 - Fixed issue where new devices would have a connectiion time of 0
+//v50.00 - Fixed issue where new devices would have a connectiion time of 0 
 //v51.00 - Added an upper bound check on the connection time limit, set connection time limit in set defaults, modified verbose mode (publish / time limit)
 //v52.00 - Added more commentary on connect and made it harder to reset the PMIC based on observations of the fleet. Checks for Verbose before turning off feature
 //v53.00 - Starting a new branch and making changes for parking lot monitor mode - First task - add Particle function and variable
@@ -135,12 +135,14 @@
 // 1) Add a particle function and variable and provide a way to add the mode value to the sysStatus structure (Repurposing verizonSIM) - Done - v53.00
 // 2) Change napping behaviour to support Keep network alive - Done - v53.01
 // 3) Change to support report on change in count. - Done - v53.02
+// 4) Added logic to support a different webhook for parking lot mode - Done - v53.03
+// Start testing
 
 
 
 // Particle Product definitions
 PRODUCT_VERSION(53);
-char currentPointRelease[6] ="53.02";
+char currentPointRelease[6] ="53.03";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -809,9 +811,16 @@ void sendEvent() {
   else {                                                              // If there were no events in the past hour/recording period, send the time when the last report was sent
     timeStampValue = lastReportedTime;                                // This should be the beginning of the current hour
   }
-  snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
-  PublishQueuePosix::instance().publish("Ubidots-Counter-Hook-v1", data, PRIVATE | WITH_ACK);
-  Log.info("Ubidots Webhook: %s", data);                              // For monitoring via serial
+  if (sysStatus.parkingLotMode == false) {
+    snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
+    PublishQueuePosix::instance().publish("Ubidots-Counter-Hook-v1", data, PRIVATE | WITH_ACK);
+    Log.info("Standard Webhook: %s", data);                              // For monitoring via serial
+  }
+  else {
+    snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
+    PublishQueuePosix::instance().publish("Ubidots-Parking-Hook-v1", data, PRIVATE | WITH_ACK);
+    Log.info("Parking Lot Webhook: %s", data);                              // For monitoring via serial    
+  }
   current.hourlyCount = 0;                                            // Reset the hourly count
   current.alerts = 0;                                                 // Reset the alert after publish
 }
