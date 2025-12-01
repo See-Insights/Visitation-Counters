@@ -5,7 +5,7 @@
 
 struct systemStatus_structure {  
   uint8_t structuresVersion;                        // Version of the data structures (system and data)
-  uint8_t placeholdervalue;                         // For future use
+  uint8_t countingIn;                               // Tracks if we are counting "in" or "out" - for parking lot mode
   bool verboseCounts;                               // Tells us if we are sending verbose count webhooks
   bool clockSet;                                    // Do we need to do a SyncTime
   bool verboseMode;                                 // Turns on extra messaging

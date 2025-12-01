@@ -128,6 +128,8 @@
 //v53.00 - Starting a new branch and making changes for parking lot monitor mode - First task - add Particle function and variable
 //v53.01 - changing napping behaviour if parking lot mode is enabled and the battery charge level is over 50%
 //v53.02 - Forcing the counter to report on every car that is counted.
+//v53.03 - Adding logic to support a different webhook when in parking lot mode.
+//v53.04 - Updated the "Parking Lot Mode" webhook to include the counter as "in or out" based on the countingIn variable in sysStatus structure.
 
 
 // To-do list to add a "Parking Lot Mode"
@@ -136,13 +138,14 @@
 // 2) Change napping behaviour to support Keep network alive - Done - v53.01
 // 3) Change to support report on change in count. - Done - v53.02
 // 4) Added logic to support a different webhook for parking lot mode - Done - v53.03
+// 5) Update the parking lot webhook to include "in or out" - Done - v53.04
 // Start testing
 
 
 
 // Particle Product definitions
 PRODUCT_VERSION(53);
-char currentPointRelease[6] ="53.03";
+char currentPointRelease[6] ="53.04";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -239,7 +242,7 @@ bool firmwareUpdateInProgress = false;              // Helps us track if a firmw
 char SignalString[64];                              // Used to communicate Wireless RSSI and Description
 char batteryContextStr[16];                         // Tracks the battery context
 char lowPowerModeStr[16];                           // In low power mode?
-char countModeStr[14];                              // What is our current counting mode
+char countModeStr[16];                              // What is our current counting mode
 char openTimeStr[8]="NA";                           // Park Open Time
 char closeTimeStr[8]="NA";                          // Park close Time
 char sensorTypeConfigStr[16];
@@ -290,6 +293,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.variable("BatteryContext",batteryContextMessage);
   Particle.variable("SensorStatus",sensorTypeConfigStr);
   Particle.variable("CountMode", countModeStr);
+  Particle.variable("CountingIn", sysStatus.countingIn);
 
   Particle.function("setDailyCount", setDailyCount);                  // These are the functions exposed to the mobile app and console
   Particle.function("resetCounts",resetCounts);
@@ -304,6 +308,7 @@ void setup()                                        // Note: Disconnected Setup(
   Particle.function("Set-Close",setCloseTime);
   Particle.function("Set-SensorType",setSensorType);
   Particle.function("setParkingLotMode",setParkingLotMode);
+  Particle.function("Set-Counting-Direction",setCountingDirection);
 
   // Particle and System Set up next
   Particle.setDisconnectOptions(CloudDisconnectOptions().graceful(true).timeout(5s));  // Don't disconnect abruptly
@@ -817,9 +822,9 @@ void sendEvent() {
     Log.info("Standard Webhook: %s", data);                              // For monitoring via serial
   }
   else {
-    snprintf(data, sizeof(data), "{\"hourly\":%i, \"daily\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"maxmin\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.hourlyCount, current.dailyCount, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, current.maxMinValue, sysStatus.lastConnectionDuration, timeStampValue);
+    snprintf(data, sizeof(data), "{\"daily\":%i, \"countingin\":%i,\"battery\":%i,\"key1\":\"%s\",\"temp\":%i, \"resets\":%i, \"alerts\":%i,\"connecttime\":%i,\"timestamp\":%lu000}",current.dailyCount, sysStatus.countingIn, sysStatus.stateOfCharge, batteryContext[sysStatus.batteryState], current.temperature, sysStatus.resetCount, current.alerts, sysStatus.lastConnectionDuration, timeStampValue);
     PublishQueuePosix::instance().publish("Ubidots-Parking-Hook-v1", data, PRIVATE | WITH_ACK);
-    Log.info("Parking Lot Webhook: %s", data);                              // For monitoring via serial    
+    Log.info("Parking Lot Webhook: %s", data);                        // For monitoring via serial    
   }
   current.hourlyCount = 0;                                            // Reset the hourly count
   current.alerts = 0;                                                 // Reset the alert after publish
@@ -1073,6 +1078,7 @@ void checkSystemValues() {                                          // Checks to
   if (sysStatus.openTime < 0 || sysStatus.openTime > 12) sysStatus.openTime = 0;
   if (sysStatus.closeTime < 12 || sysStatus.closeTime > 24) sysStatus.closeTime = 24;
   if (sysStatus.parkingLotMode != 0 && sysStatus.parkingLotMode != 1) sysStatus.parkingLotMode = 0; // Default to not parking lot mode
+  if (sysStatus.countingIn != 0 && sysStatus.countingIn != 1) sysStatus.countingIn = 1;               // Default to counting in
   if (current.currentConnectionLimit < 180 || current.currentConnectionLimit > 420) current.currentConnectionLimit = 180;
 
   // None for lastHookResponse
@@ -1109,7 +1115,8 @@ void makeUpStringMessages() {
   else if (sysStatus.sensorType == 1) strncpy(sensorTypeConfigStr,"PIR Sensor",sizeof(sensorTypeConfigStr));
   else strncpy(sensorTypeConfigStr,"Unknown Sensor",sizeof(sensorTypeConfigStr));
 
-  if (sysStatus.parkingLotMode) strncpy(countModeStr,"Parking Lot", sizeof(countModeStr));
+  if (sysStatus.parkingLotMode && sysStatus.countingIn) strncpy(countModeStr,"Parking Lot In", sizeof(countModeStr));
+  else if (sysStatus.parkingLotMode && !sysStatus.countingIn) strncpy(countModeStr,"Parking Lot Out", sizeof(countModeStr));    
   else strncpy(countModeStr,"Particle", sizeof(countModeStr));
 
   return;
@@ -1256,6 +1263,27 @@ int setParkingLotMode(String command)                                   // If we
     systemStatusWriteNeeded = true;
     makeUpStringMessages();
     if (Particle.connected()) Particle.publish("Mode","Set to visitation mode", PRIVATE);
+    return 1;
+  }
+  else return 0;
+}
+
+int setCountingDirection(String command)                                   // Tells if the counter is counting IN or OUT for parking lot mode
+{
+  if (command == "1")
+  {
+    sysStatus.countingIn = true;
+    systemStatusWriteNeeded = true;
+    makeUpStringMessages();
+    if (Particle.connected()) Particle.publish("Mode","Set to count IN for parking lot mode", PRIVATE);
+    return 1;
+  }
+  else if (command == "0")
+  {
+    sysStatus.countingIn = false;
+    systemStatusWriteNeeded = true;
+    makeUpStringMessages();
+    if (Particle.connected()) Particle.publish("Mode","Set to count OUT for parking lot mode", PRIVATE);
     return 1;
   }
   else return 0;
