@@ -130,7 +130,7 @@
 //v53.02 - Forcing the counter to report on every car that is counted.
 //v53.03 - Adding logic to support a different webhook when in parking lot mode.
 //v53.04 - Updated the "Parking Lot Mode" webhook to include the counter as "in or out" based on the countingIn variable in sysStatus structure.
-//v53.05 - Updated the parking lot webhook to fix the response wait timing issue. This is because an Ubifunction was used that returned "ok" instead of a numeric code.
+//v53.05a - Updated the parking lot webhook to fix the response wait timing issue. This is because an Ubifunction was used that returned "ok" instead of a numeric code.
 
 
 // To-do list to add a "Parking Lot Mode"
@@ -140,12 +140,12 @@
 // 3) Change to support report on change in count. - Done - v53.02
 // 4) Added logic to support a different webhook for parking lot mode - Done - v53.03
 // 5) Update the parking lot webhook to include "in or out" - Done - v53.04
-// 6) Update to fix the response wait resolution for the parking lot webhook - v53.05
+// 6) Update to fix the response wait resolution for the parking lot webhook - v53.05a
 // Start testing
 
 // Particle Product definitions
 PRODUCT_VERSION(53);
-char currentPointRelease[6] ="53.05";
+char currentPointRelease[7] = "53.05a";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -887,7 +887,7 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
     systemStatusWriteNeeded = true;
     dataInFlight = false;                                             // Data has been received
   }
-  else if (sysStatus.parkingLotMode && strcmp(data, "ok") == 0) {
+  else if (sysStatus.parkingLotMode && atoi(data) == 200) {
     snprintf(responseString, sizeof(responseString),"Parking Response Received");
     sysStatus.lastHookResponse = Time.now();                          // Record the last successful Webhook Response
     systemStatusWriteNeeded = true;
