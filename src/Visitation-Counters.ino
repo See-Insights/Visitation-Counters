@@ -130,6 +130,7 @@
 //v53.02 - Forcing the counter to report on every car that is counted.
 //v53.03 - Adding logic to support a different webhook when in parking lot mode.
 //v53.04 - Updated the "Parking Lot Mode" webhook to include the counter as "in or out" based on the countingIn variable in sysStatus structure.
+//v53.05 - Updated the parking lot webhook to fix the response wait timing issue. This is because an Ubifunction was used that returned "ok" instead of a numeric code.
 
 
 // To-do list to add a "Parking Lot Mode"
@@ -139,13 +140,12 @@
 // 3) Change to support report on change in count. - Done - v53.02
 // 4) Added logic to support a different webhook for parking lot mode - Done - v53.03
 // 5) Update the parking lot webhook to include "in or out" - Done - v53.04
+// 6) Update to fix the response wait resolution for the parking lot webhook - v53.05
 // Start testing
-
-
 
 // Particle Product definitions
 PRODUCT_VERSION(53);
-char currentPointRelease[6] ="53.04";
+char currentPointRelease[6] ="53.05";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -199,9 +199,9 @@ AB1805 ab1805(Wire);                                // Rickkas' RTC / Watchdog l
 FuelGauge fuelGauge;                                // Needed to address issue with updates in low battery state
 
 // For monitoring / debugging, you have some options on the next few lines
-SerialLogHandler logHandler(LOG_LEVEL_TRACE);
-//SerialLogHandler logHandler(LOG_LEVEL_ALL);        // All the loggings 
-// SerialLogHandler logHandler(LOG_LEVEL_INFO);      // Easier to see the program flow
+// SerialLogHandler logHandler(LOG_LEVEL_TRACE);
+// SerialLogHandler logHandler(LOG_LEVEL_ALL);        // All the loggings 
+SerialLogHandler logHandler(LOG_LEVEL_INFO);      // Easier to see the program flow
 // Serial1LogHandler logHandler1(57600);             // This line is for when we are using the OTII ARC for power analysis
 
 // State Machine Variables
@@ -881,8 +881,14 @@ void UbidotsHandler(const char *event, const char *data) {            // Looks a
   if (!strlen(data)) {                                                // No data in response - Error
     snprintf(responseString, sizeof(responseString),"No Data");
   }
-  else if (atoi(data) == 200 || atoi(data) == 201) {
+  else if (!sysStatus.parkingLotMode && (atoi(data) == 200 || atoi(data) == 201)) {
     snprintf(responseString, sizeof(responseString),"Response Received");
+    sysStatus.lastHookResponse = Time.now();                          // Record the last successful Webhook Response
+    systemStatusWriteNeeded = true;
+    dataInFlight = false;                                             // Data has been received
+  }
+  else if (sysStatus.parkingLotMode && strcmp(data, "ok") == 0) {
+    snprintf(responseString, sizeof(responseString),"Parking Response Received");
     sysStatus.lastHookResponse = Time.now();                          // Record the last successful Webhook Response
     systemStatusWriteNeeded = true;
     dataInFlight = false;                                             // Data has been received
